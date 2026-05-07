@@ -1205,7 +1205,16 @@ func selectForeachPane(strategy string, strategyPanes []paneStrategyPane, panes 
 	case "rotate_adjudicator":
 		paneID, err = rotateAdjudicator(foreachPaneIDs(strategyPanes), foreachItemStrings(item, "champions", "champion_a", "champion_b"), nil)
 	case "by_model_family":
-		paneID, err = byModelFamily(strategyPanes, foreachItemString(item, "model_family", "model", "family", "type"))
+		// Normalize through the pane vocabulary so a canonical author family
+		// like "cc" routes to a pane spawned with ModelFamily="opus", and a
+		// verbose "claude-sonnet-4" routes to either "claude" or a bare
+		// variant pane. Without this, byModelFamily exact-compares strings
+		// and fails to route across the family/variant boundary.
+		raw := foreachItemString(item, "model_family", "model", "family", "type")
+		if mapped := mapModelFamilyToPaneVocabulary(raw, strategyPanes); mapped != "" {
+			raw = mapped
+		}
+		paneID, err = byModelFamily(strategyPanes, raw)
 	case "by_model_family_difference":
 		var warned bool
 		paneID, warned, err = byModelFamilyDifference(strategyPanes, foreachAuthorModelFamilyForPanes(item, strategyPanes))

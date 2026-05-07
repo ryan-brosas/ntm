@@ -68,6 +68,42 @@ func TestForeachAuthorModelFamilyForPanesPrefersPaneVocabulary(t *testing.T) {
 	}
 }
 
+func TestSelectForeachPaneByModelFamilyRoutesCanonicalToVariantPanes(t *testing.T) {
+	// Phase-6-style foreach over model families typically uses canonical tokens
+	// (cc, cod, gmi) or verbose names (claude-sonnet-4) in items, while panes
+	// often store ModelFamily as the bare variant (opus, sonnet, pro). Without
+	// normalizing through the pane vocabulary, byModelFamily exact-compares
+	// strings and returns errNoModelFamilyPane.
+	cases := []struct {
+		name     string
+		paneFam  string
+		itemFam  string
+		wantPane string
+	}{
+		{name: "cc routes to opus pane", paneFam: "opus", itemFam: "cc", wantPane: "p1"},
+		{name: "claude routes to sonnet pane", paneFam: "sonnet", itemFam: "claude", wantPane: "p1"},
+		{name: "verbose claude-sonnet-4 routes to haiku pane", paneFam: "haiku", itemFam: "claude-sonnet-4", wantPane: "p1"},
+		{name: "gmi routes to pro pane", paneFam: "pro", itemFam: "gmi", wantPane: "p1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			strategyPanes := []paneStrategyPane{
+				{ID: "p1", ModelFamily: tc.paneFam},
+				{ID: "p2", ModelFamily: "cod"},
+			}
+			item := map[string]interface{}{"model_family": tc.itemFam}
+
+			got, _, _, err := selectForeachPane("by_model_family", strategyPanes, nil, item, 0)
+			if err != nil {
+				t.Fatalf("selectForeachPane() error = %v", err)
+			}
+			if got != tc.wantPane {
+				t.Fatalf("selectForeachPane() = %q, want %q", got, tc.wantPane)
+			}
+		})
+	}
+}
+
 func TestSelectForeachPaneModelFamilyDifferenceTreatsGeminiVariantsAsSameFamily(t *testing.T) {
 	// Gemini panes are commonly stored with bare variant ModelFamily values
 	// like "pro", "flash", or "ultra" (paneMetadataFromTmuxPane variant
