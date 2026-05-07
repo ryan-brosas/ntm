@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -1140,6 +1141,18 @@ func showPipelineStatus(runID string) error {
 		exec.Progress.Total,
 		exec.Progress.Percent)
 
+	if len(exec.Progress.SkipKindCounts) > 0 {
+		kinds := make([]string, 0, len(exec.Progress.SkipKindCounts))
+		for k := range exec.Progress.SkipKindCounts {
+			kinds = append(kinds, string(k))
+		}
+		sort.Strings(kinds)
+		fmt.Println("\nSkipped by kind:")
+		for _, k := range kinds {
+			fmt.Printf("  %-32s %d\n", k, exec.Progress.SkipKindCounts[pipeline.SkipKind(k)])
+		}
+	}
+
 	if len(exec.Steps) > 0 {
 		fmt.Println("\nSteps:")
 		for id, step := range exec.Steps {
@@ -1154,7 +1167,14 @@ func showPipelineStatus(runID string) error {
 			case "skipped":
 				status = "⊘ skipped"
 			}
-			fmt.Printf("  [%s] %s\n", id, status)
+			line := fmt.Sprintf("  [%s] %s", id, status)
+			if step.SkipKind != "" {
+				line += fmt.Sprintf(" (%s)", step.SkipKind)
+			}
+			if step.SkipReason != "" {
+				line += fmt.Sprintf(": %s", step.SkipReason)
+			}
+			fmt.Println(line)
 		}
 	}
 

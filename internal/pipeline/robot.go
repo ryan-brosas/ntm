@@ -80,26 +80,29 @@ type PipelineExecution struct {
 
 // PipelineProgress tracks overall progress
 type PipelineProgress struct {
-	Completed int     `json:"completed"`
-	Running   int     `json:"running"`
-	Pending   int     `json:"pending"`
-	Failed    int     `json:"failed"`
-	Skipped   int     `json:"skipped"`
-	Total     int     `json:"total"`
-	Percent   float64 `json:"percent"`
+	Completed      int              `json:"completed"`
+	Running        int              `json:"running"`
+	Pending        int              `json:"pending"`
+	Failed         int              `json:"failed"`
+	Skipped        int              `json:"skipped"`
+	Total          int              `json:"total"`
+	Percent        float64          `json:"percent"`
+	SkipKindCounts map[SkipKind]int `json:"skip_kind_counts,omitempty"`
 }
 
 // PipelineStep represents step status in pipeline output
 type PipelineStep struct {
-	ID          string `json:"id"`
-	Status      string `json:"status"`
-	Agent       string `json:"agent,omitempty"`
-	PaneUsed    string `json:"pane_used,omitempty"`
-	StartedAt   string `json:"started_at,omitempty"`
-	FinishedAt  string `json:"finished_at,omitempty"`
-	DurationMs  int64  `json:"duration_ms,omitempty"`
-	OutputLines int    `json:"output_lines,omitempty"`
-	Error       string `json:"error,omitempty"`
+	ID          string   `json:"id"`
+	Status      string   `json:"status"`
+	Agent       string   `json:"agent,omitempty"`
+	PaneUsed    string   `json:"pane_used,omitempty"`
+	StartedAt   string   `json:"started_at,omitempty"`
+	FinishedAt  string   `json:"finished_at,omitempty"`
+	DurationMs  int64    `json:"duration_ms,omitempty"`
+	OutputLines int      `json:"output_lines,omitempty"`
+	Error       string   `json:"error,omitempty"`
+	SkipKind    SkipKind `json:"skip_kind,omitempty"`
+	SkipReason  string   `json:"skip_reason,omitempty"`
 }
 
 // PipelineRunOptions configures a pipeline run
@@ -595,6 +598,12 @@ func calculateProgress(state *ExecutionState) PipelineProgress {
 			progress.Failed++
 		case StatusSkipped:
 			progress.Skipped++
+			if result.SkipKind != SkipKindNone {
+				if progress.SkipKindCounts == nil {
+					progress.SkipKindCounts = make(map[SkipKind]int)
+				}
+				progress.SkipKindCounts[result.SkipKind]++
+			}
 		case StatusPending:
 			progress.Pending++
 		}
@@ -615,10 +624,12 @@ func convertSteps(state *ExecutionState) map[string]PipelineStep {
 
 	for id, result := range state.Steps {
 		step := PipelineStep{
-			ID:       id,
-			Status:   string(result.Status),
-			Agent:    result.AgentType,
-			PaneUsed: result.PaneUsed,
+			ID:         id,
+			Status:     string(result.Status),
+			Agent:      result.AgentType,
+			PaneUsed:   result.PaneUsed,
+			SkipKind:   result.SkipKind,
+			SkipReason: result.SkipReason,
 		}
 
 		if !result.StartedAt.IsZero() {

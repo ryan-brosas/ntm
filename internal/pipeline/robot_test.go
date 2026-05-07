@@ -335,6 +335,96 @@ func TestConvertSteps(t *testing.T) {
 	}
 }
 
+func TestRobotProgressSkipKindCounts(t *testing.T) {
+	state := &ExecutionState{
+		Steps: map[string]StepResult{
+			"a": {Status: StatusSkipped, SkipKind: SkipKindWhenCondition},
+			"b": {Status: StatusSkipped, SkipKind: SkipKindFailedDependency},
+			"c": {Status: StatusSkipped, SkipKind: SkipKindFailedDependency},
+			"d": {Status: StatusSkipped, SkipKind: SkipKindNone},
+			"e": {Status: StatusCompleted},
+		},
+	}
+
+	got := calculateProgress(state)
+
+	if got.Skipped != 4 {
+		t.Fatalf("Skipped = %d, want 4", got.Skipped)
+	}
+	if got.SkipKindCounts == nil {
+		t.Fatal("SkipKindCounts is nil")
+	}
+	if got.SkipKindCounts[SkipKindWhenCondition] != 1 {
+		t.Errorf("when_false count = %d, want 1", got.SkipKindCounts[SkipKindWhenCondition])
+	}
+	if got.SkipKindCounts[SkipKindFailedDependency] != 2 {
+		t.Errorf("failed_dependency count = %d, want 2", got.SkipKindCounts[SkipKindFailedDependency])
+	}
+	if _, ok := got.SkipKindCounts[SkipKindNone]; ok {
+		t.Errorf("SkipKindNone should not appear in distribution")
+	}
+}
+
+func TestRobotConvertStepsCarriesSkipKind(t *testing.T) {
+	state := &ExecutionState{
+		Steps: map[string]StepResult{
+			"step1": {
+				StepID:     "step1",
+				Status:     StatusSkipped,
+				SkipKind:   SkipKindForeachFilter,
+				SkipReason: "filter excluded role==reviewer",
+			},
+		},
+	}
+
+	steps := convertSteps(state)
+	step, ok := steps["step1"]
+	if !ok {
+		t.Fatal("step1 missing")
+	}
+	if step.SkipKind != SkipKindForeachFilter {
+		t.Errorf("SkipKind = %q, want %q", step.SkipKind, SkipKindForeachFilter)
+	}
+	if step.SkipReason != "filter excluded role==reviewer" {
+		t.Errorf("SkipReason = %q, want %q", step.SkipReason, "filter excluded role==reviewer")
+	}
+
+	payload, err := json.Marshal(step)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := string(payload)
+	if !strings.Contains(body, `"skip_kind":"foreach_filter_excluded"`) {
+		t.Errorf("json missing skip_kind field: %s", body)
+	}
+	if !strings.Contains(body, `"skip_reason":"filter excluded role==reviewer"`) {
+		t.Errorf("json missing skip_reason field: %s", body)
+	}
+}
+
+func TestRobotProgressSkipKindCountsJSON(t *testing.T) {
+	progress := PipelineProgress{
+		Skipped: 2,
+		Total:   2,
+		SkipKindCounts: map[SkipKind]int{
+			SkipKindStartFrom: 2,
+		},
+	}
+	payload, err := json.Marshal(progress)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	body := string(payload)
+	if !strings.Contains(body, `"skip_kind_counts":{"start_from_excluded":2}`) {
+		t.Errorf("json missing skip_kind_counts: %s", body)
+	}
+
+	emptyPayload, _ := json.Marshal(PipelineProgress{})
+	if strings.Contains(string(emptyPayload), "skip_kind_counts") {
+		t.Errorf("empty progress should omit skip_kind_counts: %s", emptyPayload)
+	}
+}
+
 func TestCountLines(t *testing.T) {
 
 	tests := []struct {
