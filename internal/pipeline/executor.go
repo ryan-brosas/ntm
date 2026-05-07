@@ -1728,8 +1728,16 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 	result.ParsedData = groupOutputs
 	e.storeParallelOutputVars(step, results, completionOrder)
 
-	// Determine final status based on error mode and results
-	if failed > 0 || cancelled {
+	// Determine final status based on error mode and results.
+	//
+	// bd-v4u1i: handle external context.Canceled (e.g. Ctrl-C, parent workflow
+	// cancel) and per-substep StatusCancelled separately from the failure
+	// branch so a cancelled run does not get persisted as StatusCompleted.
+	// Order matters: timeout takes precedence over generic cancel; failure
+	// branch takes precedence over cancel-only because failed children are a
+	// stronger signal than the parent context being torn down after them.
+	switch {
+	case failed > 0 || cancelled:
 		aggregatedErr := aggregateParallelErrors(results, len(results))
 		switch onError {
 		case ErrorActionContinue:
@@ -1758,14 +1766,24 @@ func (e *Executor) executeParallel(ctx context.Context, step *Step, workflow *Wo
 				}
 			}
 		}
-	} else if ctx.Err() == context.DeadlineExceeded {
+	case ctx.Err() == context.DeadlineExceeded:
 		result.Status = StatusFailed
 		result.Error = &StepError{
 			Type:      "parallel_timeout",
 			Message:   fmt.Sprintf("parallel group timed out after %s", step.Timeout.Duration),
 			Timestamp: time.Now(),
 		}
-	} else {
+	case ctx.Err() == context.Canceled || cancelledCount > 0:
+		result.Status = StatusCancelled
+		result.SkipKind = SkipKindCancelled
+		result.SkipReason = fmt.Sprintf("parallel group cancelled (%d cancelled, %d completed of %d)",
+			cancelledCount, completed, len(results))
+		result.Error = &StepError{
+			Type:      "parallel_cancelled",
+			Message:   result.SkipReason,
+			Timestamp: time.Now(),
+		}
+	default:
 		result.Status = StatusCompleted
 		result.Output = fmt.Sprintf("All %d parallel steps completed", len(results))
 	}
