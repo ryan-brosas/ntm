@@ -247,9 +247,10 @@ func clearWorkflowStepVariables(vars map[string]interface{}, workflow *Workflow)
 }
 
 func (e *Executor) forceResumeIteration(stepID string, iteration int) {
+	var prunedStepIDs []string
 	e.stateMu.Lock()
-	defer e.stateMu.Unlock()
 	if e.state == nil {
+		e.stateMu.Unlock()
 		return
 	}
 	if e.state.ForeachState == nil {
@@ -266,7 +267,38 @@ func (e *Executor) forceResumeIteration(stepID string, iteration int) {
 	for id := range e.state.Steps {
 		if iterationIndexFromID(id, prefix) >= iteration {
 			delete(e.state.Steps, id)
+			prunedStepIDs = append(prunedStepIDs, id)
 		}
+	}
+	e.stateMu.Unlock()
+
+	// bd-a3fwf: deleting StepResults is not enough — Substitutor.resolveSteps
+	// reads flat steps.<id>.output / steps.<id>.data variables (and per-step
+	// output_var entries) before falling back to state.Steps. Without
+	// scrubbing those flat keys, a forced rerun from iteration N can still
+	// resolve ghost outputs from iterations >=N whose StepResults were
+	// pruned. Clear variables outside stateMu to keep lock ordering consistent
+	// with substituteVariablesStrict (varMu acquired separately, never nested
+	// under stateMu — see snapshotState bd-xuxev note). Use a graph-nil-safe
+	// inline path rather than executor.clearStepVariables: forceResumeIteration
+	// can be invoked before the workflow graph is rebuilt (and in unit tests
+	// the graph is never set), and the executor helper would NPE on
+	// e.graph.GetStep(id) in those cases.
+	if len(prunedStepIDs) > 0 {
+		e.varMu.Lock()
+		if e.state != nil && e.state.Variables != nil {
+			for _, id := range prunedStepIDs {
+				delete(e.state.Variables, "steps."+id+".output")
+				delete(e.state.Variables, "steps."+id+".data")
+				if e.graph != nil {
+					if step, ok := e.graph.GetStep(id); ok && step.OutputVar != "" {
+						delete(e.state.Variables, step.OutputVar)
+						delete(e.state.Variables, step.OutputVar+"_parsed")
+					}
+				}
+			}
+		}
+		e.varMu.Unlock()
 	}
 }
 

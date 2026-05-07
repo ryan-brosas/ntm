@@ -90,7 +90,17 @@ func TestForceResumeIterationPrunesFutureIterationState(t *testing.T) {
 			"fanout_iter3_work": {StepID: "fanout_iter3_work", Status: StatusCompleted},
 			"other_iter9":       {StepID: "other_iter9", Status: StatusCompleted},
 		},
-		Variables: map[string]interface{}{},
+		// bd-a3fwf: seed flat substitution keys for both pre-pivot iterations
+		// (must survive) and post-pivot iterations (must be scrubbed).
+		Variables: map[string]interface{}{
+			"steps.fanout_iter0.output":      "keep-prev",
+			"steps.fanout_iter1.output":      "keep-prev",
+			"steps.fanout_iter2.output":      "ghost",
+			"steps.fanout_iter2.data":        map[string]interface{}{"v": 2},
+			"steps.fanout_iter3_work.output": "ghost",
+			"steps.fanout_iter3_work.data":   "ghost-data",
+			"steps.other_iter9.output":       "unrelated-step-keep",
+		},
 		ForeachState: map[string]ForeachIterationState{
 			"fanout": {
 				StepID:                "fanout",
@@ -119,6 +129,27 @@ func TestForceResumeIterationPrunesFutureIterationState(t *testing.T) {
 	for _, kept := range []string{"fanout_iter0", "fanout_iter1", "other_iter9"} {
 		if _, ok := executor.state.Steps[kept]; !ok {
 			t.Fatalf("step %q was removed unexpectedly: %#v", kept, executor.state.Steps)
+		}
+	}
+	// bd-a3fwf: ghost variables for pruned iterations must be scrubbed so a
+	// forced rerun does not resolve through stale future-iteration outputs.
+	for _, ghost := range []string{
+		"steps.fanout_iter2.output",
+		"steps.fanout_iter2.data",
+		"steps.fanout_iter3_work.output",
+		"steps.fanout_iter3_work.data",
+	} {
+		if _, ok := executor.state.Variables[ghost]; ok {
+			t.Fatalf("ghost variable %q survived force iteration: %#v", ghost, executor.state.Variables)
+		}
+	}
+	for _, kept := range []string{
+		"steps.fanout_iter0.output",
+		"steps.fanout_iter1.output",
+		"steps.other_iter9.output",
+	} {
+		if _, ok := executor.state.Variables[kept]; !ok {
+			t.Fatalf("variable %q was scrubbed unexpectedly: %#v", kept, executor.state.Variables)
 		}
 	}
 }
