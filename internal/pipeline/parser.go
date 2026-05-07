@@ -488,6 +488,13 @@ func validateStep(step *Step, stepField string, stepIDs map[string]bool, result 
 			Hint:    "Agent Mail step kinds run through MCP Agent Mail rather than tmux pane dispatch",
 		})
 	}
+	// bd-vv7ij: surface required-field errors for the chosen Agent Mail
+	// step kind so an empty mail_send / paths-less reservation fails up
+	// front instead of becoming a confusing runtime no-op once execution
+	// is wired (bd-hz1tl).
+	if hasMailStep && len(mailStepKinds) == 1 {
+		validateMailStepPayload(step, stepField, result)
+	}
 	if hasBeadQuery && (hasPrompt || hasParallel || hasCommand || hasTemplate || hasForeach || hasBranch || hasMailStep || step.Loop != nil) {
 		result.addError(ParseError{
 			Field:   stepField,

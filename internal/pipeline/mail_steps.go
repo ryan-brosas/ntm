@@ -1,5 +1,10 @@
 package pipeline
 
+import (
+	"fmt"
+	"strings"
+)
+
 // MailSendStep describes a first-class MCP Agent Mail send operation.
 type MailSendStep struct {
 	ProjectKey  string       `yaml:"project_key,omitempty" toml:"project_key,omitempty" json:"project_key,omitempty"`
@@ -57,4 +62,147 @@ func (s *Step) mailStepKindNames() []string {
 		names = append(names, "file_reservation_release")
 	}
 	return names
+}
+
+// validateMailStepPayload reports per-kind required-field errors for the
+// Agent Mail step kinds (bd-vv7ij). Mutual-exclusion checks live in
+// Validate; this only fires when exactly one mail step kind is set.
+func validateMailStepPayload(step *Step, stepField string, result *ValidationResult) {
+	if step == nil {
+		return
+	}
+
+	if send := step.MailSend; send != nil {
+		field := stepField + ".mail_send"
+		if strings.TrimSpace(send.ProjectKey) == "" {
+			result.addError(ParseError{
+				Field:   field + ".project_key",
+				Message: "mail_send requires project_key",
+				Hint:    "Set the absolute project root (e.g. /data/projects/ntm) so MCP Agent Mail can scope the send.",
+			})
+		}
+		if strings.TrimSpace(send.AgentName) == "" {
+			result.addError(ParseError{
+				Field:   field + ".agent_name",
+				Message: "mail_send requires agent_name",
+				Hint:    "Set agent_name to the sender's roster name (e.g. TealCrane).",
+			})
+		}
+		if len(send.To) == 0 {
+			result.addError(ParseError{
+				Field:   field + ".to",
+				Message: "mail_send requires at least one recipient in to",
+				Hint:    "Use a string for a single recipient or a list for multiple recipients.",
+			})
+		} else {
+			for i, recipient := range send.To {
+				if strings.TrimSpace(recipient) == "" {
+					result.addError(ParseError{
+						Field:   fmt.Sprintf("%s.to[%d]", field, i),
+						Message: "mail_send recipient cannot be empty",
+					})
+				}
+			}
+		}
+		if strings.TrimSpace(send.Subject) == "" && strings.TrimSpace(send.Body) == "" {
+			result.addError(ParseError{
+				Field:   field,
+				Message: "mail_send requires subject or body",
+				Hint:    "Set subject or body so the recipient has something to read.",
+			})
+		}
+	}
+
+	if reserve := step.FileReservationPaths; reserve != nil {
+		field := stepField + ".file_reservation_paths"
+		if strings.TrimSpace(reserve.ProjectKey) == "" {
+			result.addError(ParseError{
+				Field:   field + ".project_key",
+				Message: "file_reservation_paths requires project_key",
+			})
+		}
+		if strings.TrimSpace(reserve.AgentName) == "" {
+			result.addError(ParseError{
+				Field:   field + ".agent_name",
+				Message: "file_reservation_paths requires agent_name",
+			})
+		}
+		if len(reserve.Paths) == 0 {
+			result.addError(ParseError{
+				Field:   field + ".paths",
+				Message: "file_reservation_paths requires at least one path",
+				Hint:    "Use a string for a single path or a list for multiple paths.",
+			})
+		} else {
+			for i, path := range reserve.Paths {
+				if strings.TrimSpace(path) == "" {
+					result.addError(ParseError{
+						Field:   fmt.Sprintf("%s.paths[%d]", field, i),
+						Message: "file_reservation_paths path cannot be empty",
+					})
+				}
+			}
+		}
+		if reserve.TTLSeconds < 0 {
+			result.addError(ParseError{
+				Field:   field + ".ttl_seconds",
+				Message: fmt.Sprintf("file_reservation_paths.ttl_seconds must be non-negative, got %d", reserve.TTLSeconds),
+				Hint:    "Use 0 for the server default or a positive integer for the lock TTL in seconds.",
+			})
+		}
+	}
+
+	if inbox := step.MailInboxCheck; inbox != nil {
+		field := stepField + ".mail_inbox_check"
+		if strings.TrimSpace(inbox.ProjectKey) == "" {
+			result.addError(ParseError{
+				Field:   field + ".project_key",
+				Message: "mail_inbox_check requires project_key",
+			})
+		}
+		if strings.TrimSpace(inbox.AgentName) == "" {
+			result.addError(ParseError{
+				Field:   field + ".agent_name",
+				Message: "mail_inbox_check requires agent_name",
+			})
+		}
+		if inbox.UntilAckCount < 0 {
+			result.addError(ParseError{
+				Field:   field + ".until_ack_count",
+				Message: fmt.Sprintf("mail_inbox_check.until_ack_count must be non-negative, got %d", inbox.UntilAckCount),
+			})
+		}
+	}
+
+	if release := step.FileReservationRelease; release != nil {
+		field := stepField + ".file_reservation_release"
+		if strings.TrimSpace(release.ProjectKey) == "" {
+			result.addError(ParseError{
+				Field:   field + ".project_key",
+				Message: "file_reservation_release requires project_key",
+			})
+		}
+		if strings.TrimSpace(release.AgentName) == "" {
+			result.addError(ParseError{
+				Field:   field + ".agent_name",
+				Message: "file_reservation_release requires agent_name",
+			})
+		}
+		if len(release.Paths) == 0 {
+			result.addError(ParseError{
+				Field:   field + ".paths",
+				Message: "file_reservation_release requires at least one path",
+				Hint:    "Use a string for a single path or a list for multiple paths.",
+			})
+		} else {
+			for i, path := range release.Paths {
+				if strings.TrimSpace(path) == "" {
+					result.addError(ParseError{
+						Field:   fmt.Sprintf("%s.paths[%d]", field, i),
+						Message: "file_reservation_release path cannot be empty",
+					})
+				}
+			}
+		}
+	}
 }
