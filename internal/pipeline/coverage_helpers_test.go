@@ -124,6 +124,57 @@ func TestCoverageHelpersForeachItemHelpers(t *testing.T) {
 	}
 }
 
+// bd-rab6y: foreachItemString must skip blank values so fallback alias keys
+// take effect. Strategies like by_model_family pass alias chains such as
+// (model_family, model, family, type) — when the canonical key is present
+// but empty, routing previously returned "" instead of the populated alias.
+func TestForeachItemString_SkipsBlankAliasValues(t *testing.T) {
+	cases := []struct {
+		name string
+		item interface{}
+		keys []string
+		want string
+	}{
+		{
+			name: "interface map: empty canonical falls through to alias",
+			item: map[string]interface{}{"model_family": "", "model": "codex"},
+			keys: []string{"model_family", "model", "family", "type"},
+			want: "codex",
+		},
+		{
+			name: "interface map: whitespace-only treated as blank",
+			item: map[string]interface{}{"model_family": "   ", "model": "claude"},
+			keys: []string{"model_family", "model"},
+			want: "claude",
+		},
+		{
+			name: "interface map: domain alias chain",
+			item: map[string]interface{}{"domain": "", "id": "task-42"},
+			keys: []string{"domain", "id"},
+			want: "task-42",
+		},
+		{
+			name: "string map: empty canonical falls through to alias",
+			item: map[string]string{"model_family": "", "model": "gemini"},
+			keys: []string{"model_family", "model"},
+			want: "gemini",
+		},
+		{
+			name: "all blank yields empty",
+			item: map[string]interface{}{"model_family": "", "model": ""},
+			keys: []string{"model_family", "model"},
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := foreachItemString(tc.item, tc.keys...); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCoverageHelpersForeachBodyAndSubstitutionHelpers(t *testing.T) {
 	workflow := &Workflow{SchemaVersion: SchemaVersion, Name: "coverage", Settings: DefaultWorkflowSettings()}
 	executor := createForeachTestExecutor(t, workflow)

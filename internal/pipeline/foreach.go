@@ -1267,6 +1267,11 @@ func paneVarsForID(panes []tmux.Pane, paneID string) (int, map[string]interface{
 	return 0, nil
 }
 
+// foreachItemString resolves an item value by trying each candidate key in
+// order. Blank values are treated as missing so fallback aliases take effect
+// when the canonical key is present-but-empty (bd-rab6y) — e.g.
+// {"model_family": "", "model": "codex"} should resolve to "codex" via the
+// fallback rather than returning "" and failing routing.
 func foreachItemString(item interface{}, keys ...string) string {
 	switch v := item.(type) {
 	case string:
@@ -1275,14 +1280,22 @@ func foreachItemString(item interface{}, keys ...string) string {
 		return v.String()
 	case map[string]interface{}:
 		for _, key := range keys {
-			if value, ok := v[key]; ok {
-				return fmt.Sprint(value)
+			value, ok := v[key]
+			if !ok {
+				continue
+			}
+			if s := strings.TrimSpace(fmt.Sprint(value)); s != "" {
+				return s
 			}
 		}
 	case map[string]string:
 		for _, key := range keys {
-			if value, ok := v[key]; ok {
-				return value
+			value, ok := v[key]
+			if !ok {
+				continue
+			}
+			if s := strings.TrimSpace(value); s != "" {
+				return s
 			}
 		}
 	}
