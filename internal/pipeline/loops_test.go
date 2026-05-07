@@ -881,6 +881,168 @@ func TestExecuteForEach_RecordsAndVerifiesItemsFingerprint(t *testing.T) {
 	}
 }
 
+// TestExecuteForEach_ResumePreservesCollectedFromPriorIterations covers
+// bd-t3q8a: a mid-loop resume must reconstruct loop.Collect outputs from
+// iterations completed in the prior run before continuing, otherwise
+// storeCollected at loop end overwrites the variable with only the
+// resumed iterations' outputs and silently drops the prior ones.
+//
+// This test simulates the post-completion resume case (all iterations
+// already done in a prior run): the current run should not re-execute
+// any iteration body but must still write the full collected variable.
+// The single-iteration-body test path requires a fully-initialized
+// executor graph and is exercised separately at the helper level via
+// the appendForeachCollectedOutput / loadForeachCollectedOutputs
+// round-trip in TestForeachCollectedOutputsPersistRoundTrip below.
+func TestExecuteForEach_ResumePreservesCollectedFromPriorIterations(t *testing.T) {
+	config := ExecutorConfig{
+		Session:       "collect-resume-session",
+		DryRun:        true,
+		GlobalTimeout: 30 * time.Second,
+	}
+	executor := NewExecutor(config)
+	items := []interface{}{"a", "b", "c"}
+	executor.state = &ExecutionState{
+		Variables: map[string]interface{}{
+			"items": items,
+		},
+		Steps: make(map[string]StepResult),
+	}
+
+	step := &Step{
+		ID: "fanout",
+		Loop: &LoopConfig{
+			Items:   "${vars.items}",
+			As:      "item",
+			Collect: "outputs",
+		},
+	}
+
+	// All iterations completed in prior run; only the fingerprint check,
+	// the prepopulate-from-state path, and storeCollected should run.
+	fp := computeForeachItemsFingerprint(items)
+	executor.state.ForeachState = map[string]ForeachIterationState{
+		"fanout": {
+			StepID:                "fanout",
+			Total:                 3,
+			CurrentIteration:      3,
+			CompletedIterationIDs: []string{"fanout_iter0", "fanout_iter1", "fanout_iter2"},
+			ItemsFingerprint:      fp,
+			CollectedOutputs:      []interface{}{"prior-out-0", "prior-out-1", "prior-out-2"},
+		},
+	}
+
+	result := executor.loopExec.ExecuteLoop(context.Background(), step, &Workflow{})
+	if result.Status != StatusCompleted {
+		t.Fatalf("resume status = %v, want completed", result.Status)
+	}
+	if got := len(result.Collected); got != 3 {
+		t.Fatalf("result.Collected length = %d, want 3 (all prior preserved): %#v", got, result.Collected)
+	}
+	want := []string{"prior-out-0", "prior-out-1", "prior-out-2"}
+	for i, v := range want {
+		if result.Collected[i] != v {
+			t.Fatalf("result.Collected[%d] = %v, want %v", i, result.Collected[i], v)
+		}
+	}
+	stored, ok := executor.state.Variables["outputs"].([]interface{})
+	if !ok {
+		t.Fatalf("vars[\"outputs\"] type = %T, want []interface{}", executor.state.Variables["outputs"])
+	}
+	if len(stored) != 3 {
+		t.Fatalf("stored outputs length = %d, want 3: %#v", len(stored), stored)
+	}
+}
+
+// TestForeachCollectedOutputsPersistRoundTrip exercises the bd-t3q8a
+// persistence helpers directly (append + load + restore-from-prior).
+// Direct helper coverage avoids the executor graph wiring required by a
+// full executeStep path while still proving that successive resumes can
+// rebuild the collected variable losslessly.
+func TestForeachCollectedOutputsPersistRoundTrip(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("collect-helper-session"))
+	executor.state = &ExecutionState{
+		Variables: map[string]interface{}{},
+		Steps:     map[string]StepResult{},
+	}
+
+	if got := executor.loadForeachCollectedOutputs("fanout"); got != nil {
+		t.Fatalf("load before any append = %#v, want nil", got)
+	}
+
+	executor.appendForeachCollectedOutput("fanout", "out-0")
+	executor.appendForeachCollectedOutput("fanout", map[string]interface{}{"k": "v"})
+	executor.appendForeachCollectedOutput("fanout", []interface{}{1.0, 2.0})
+
+	got := executor.loadForeachCollectedOutputs("fanout")
+	if len(got) != 3 {
+		t.Fatalf("load after appends = %#v, want 3 entries", got)
+	}
+	if got[0] != "out-0" {
+		t.Fatalf("entry 0 = %v, want \"out-0\"", got[0])
+	}
+
+	// load returns a copy: mutating it must not corrupt the persisted state.
+	got[0] = "mutated"
+	persisted := executor.state.ForeachState["fanout"].CollectedOutputs
+	if persisted[0] != "out-0" {
+		t.Fatalf("persisted entry 0 mutated through load() copy: %v", persisted[0])
+	}
+
+	// Other steps stay isolated.
+	if got := executor.loadForeachCollectedOutputs("other"); got != nil {
+		t.Fatalf("load for unknown step = %#v, want nil", got)
+	}
+}
+
+// TestForceResumeIteration_TruncatesCollectedOutputs covers the
+// bd-t3q8a interaction with bd-a3fwf force-iter resume: rewinding to
+// iteration N must drop persisted CollectedOutputs[N:] so the rerun's
+// fresh entries don't sit alongside the stale prior ones in the final
+// stored variable.
+func TestForceResumeIteration_TruncatesCollectedOutputs(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("force-collect-session"))
+	executor.state = &ExecutionState{
+		Variables: map[string]interface{}{},
+		Steps:     map[string]StepResult{},
+		ForeachState: map[string]ForeachIterationState{
+			"fanout": {
+				StepID:                "fanout",
+				Total:                 4,
+				CurrentIteration:      4,
+				CompletedIterationIDs: []string{"fanout_iter0", "fanout_iter1", "fanout_iter2", "fanout_iter3"},
+				CollectedOutputs:      []interface{}{"out0", "out1", "out2", "out3"},
+			},
+		},
+	}
+
+	executor.forceResumeIteration("fanout", 2)
+
+	got := executor.state.ForeachState["fanout"].CollectedOutputs
+	want := []interface{}{"out0", "out1"}
+	if len(got) != len(want) {
+		t.Fatalf("CollectedOutputs after force-iter to 2 = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("CollectedOutputs[%d] = %v, want %v", i, got[i], want[i])
+		}
+	}
+
+	// Rewinding to iteration 0 should clear all collected entries.
+	executor.state.ForeachState["fanout"] = ForeachIterationState{
+		StepID:                "fanout",
+		Total:                 4,
+		CurrentIteration:      4,
+		CompletedIterationIDs: []string{"fanout_iter0", "fanout_iter1", "fanout_iter2", "fanout_iter3"},
+		CollectedOutputs:      []interface{}{"out0", "out1", "out2", "out3"},
+	}
+	executor.forceResumeIteration("fanout", 0)
+	if got := executor.state.ForeachState["fanout"].CollectedOutputs; len(got) != 0 {
+		t.Fatalf("CollectedOutputs after force-iter to 0 = %#v, want empty", got)
+	}
+}
+
 // TestComputeForeachItemsFingerprint_StableAndDivergent verifies the
 // fingerprint is deterministic for equivalent inputs and diverges for
 // reordered or modified inputs (bd-3awat).

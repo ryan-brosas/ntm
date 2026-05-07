@@ -64,14 +64,21 @@ type ResumeOptions struct {
 // step output, glob, etc.) would silently apply old completion records to
 // new items. Recording the fingerprint lets executeForEach refuse resume
 // when the resolved items diverge from the original run.
+//
+// CollectedOutputs (bd-t3q8a) preserves the loop.Collect outputs for
+// already-completed iterations so a mid-loop resume can reconstruct them
+// before continuing. Without this the resumed loop would store loop.Collect
+// using only the iterations that ran on the resume, silently dropping the
+// outputs from iterations completed in the prior run.
 type ForeachIterationState struct {
-	StepID                string    `json:"step_id"`
-	CurrentIteration      int       `json:"current_iteration"`
-	Total                 int       `json:"total"`
-	CompletedIterationIDs []string  `json:"completed_iteration_ids,omitempty"`
-	ItemsFingerprint      string    `json:"items_fingerprint,omitempty"`
-	StartedAt             time.Time `json:"started_at,omitempty"`
-	UpdatedAt             time.Time `json:"updated_at,omitempty"`
+	StepID                string        `json:"step_id"`
+	CurrentIteration      int           `json:"current_iteration"`
+	Total                 int           `json:"total"`
+	CompletedIterationIDs []string      `json:"completed_iteration_ids,omitempty"`
+	ItemsFingerprint      string        `json:"items_fingerprint,omitempty"`
+	CollectedOutputs      []interface{} `json:"collected_outputs,omitempty"`
+	StartedAt             time.Time     `json:"started_at,omitempty"`
+	UpdatedAt             time.Time     `json:"updated_at,omitempty"`
 }
 
 // ParallelGroupState records the persisted progress of a parallel step group.
@@ -272,6 +279,14 @@ func (e *Executor) forceResumeIteration(stepID string, iteration int) {
 	state.StepID = stepID
 	state.CurrentIteration = iteration
 	state.CompletedIterationIDs = filterCompletedIterationsBefore(state.CompletedIterationIDs, stepID, iteration)
+	// bd-t3q8a: sequential foreach (loops.go) appends collected outputs in
+	// iteration order, so truncating to length=iteration drops the entries
+	// for the iterations that are about to rerun. Without this, the
+	// rerun would observe duplicated entries (prior + reran) in the final
+	// loop.Collect store.
+	if iteration >= 0 && iteration < len(state.CollectedOutputs) {
+		state.CollectedOutputs = append([]interface{}(nil), state.CollectedOutputs[:iteration]...)
+	}
 	state.UpdatedAt = time.Now()
 	e.state.ForeachState[stepID] = state
 
@@ -453,6 +468,50 @@ func (e *Executor) verifyForeachItemsFingerprint(stepID, fingerprint string) err
 	}
 	return fmt.Errorf("foreach %q items changed since prior run (completed=%d, prior_fingerprint=%s, current_fingerprint=%s); resume would apply old iteration records to different items",
 		stepID, len(prior.CompletedIterationIDs), prior.ItemsFingerprint[:12], fingerprint[:12])
+}
+
+// appendForeachCollectedOutput persists a single loop.Collect output for
+// a completed iteration. The slice on ForeachIterationState mirrors the
+// in-memory LoopResult.Collected so a mid-loop resume can reconstruct
+// outputs from iterations completed before the interruption (bd-t3q8a).
+// Sequential foreach is the only caller; parallel foreach (foreach.go)
+// has its own bookkeeping path.
+func (e *Executor) appendForeachCollectedOutput(stepID string, value interface{}) {
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	if e.state == nil {
+		return
+	}
+	if e.state.ForeachState == nil {
+		e.state.ForeachState = make(map[string]ForeachIterationState)
+	}
+	state := e.state.ForeachState[stepID]
+	if state.StepID == "" {
+		state.StepID = stepID
+		state.StartedAt = time.Now()
+	}
+	state.CollectedOutputs = append(state.CollectedOutputs, value)
+	state.UpdatedAt = time.Now()
+	e.state.ForeachState[stepID] = state
+}
+
+// loadForeachCollectedOutputs returns a copy of the persisted collected
+// outputs for a foreach step, or nil if none exist (bd-t3q8a). The copy
+// isolates the caller's slice from concurrent appends to the underlying
+// state.
+func (e *Executor) loadForeachCollectedOutputs(stepID string) []interface{} {
+	e.stateMu.RLock()
+	defer e.stateMu.RUnlock()
+	if e.state == nil || e.state.ForeachState == nil {
+		return nil
+	}
+	state, ok := e.state.ForeachState[stepID]
+	if !ok || len(state.CollectedOutputs) == 0 {
+		return nil
+	}
+	out := make([]interface{}, len(state.CollectedOutputs))
+	copy(out, state.CollectedOutputs)
+	return out
 }
 
 // recordForeachItemsFingerprint stores the fingerprint of the resolved

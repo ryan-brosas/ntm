@@ -167,6 +167,18 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 	startIndex := le.executor.beginForeachState(step.ID, total)
 	le.executor.persistState()
 
+	// bd-t3q8a: a mid-loop resume starts at the first incomplete iteration
+	// with a fresh result.Collected. Without restoring outputs from
+	// iterations completed in the prior run, storeCollected at the end of
+	// the loop would silently overwrite the collected variable with only
+	// the resumed iterations. Prepopulate from persisted state so the
+	// final store sees every iteration's contribution.
+	if loop.Collect != "" {
+		if prior := le.executor.loadForeachCollectedOutputs(step.ID); len(prior) > 0 {
+			result.Collected = append(result.Collected, prior...)
+		}
+	}
+
 	// Iterate over items
 	for i := startIndex; i < len(items); i++ {
 		item := items[i]
@@ -196,13 +208,23 @@ func (le *LoopExecutor) executeForEach(ctx context.Context, step *Step, loop *Lo
 		}
 		le.executor.persistState()
 
-		// Collect output if configured
+		// Collect output if configured. bd-t3q8a: persist each iteration's
+		// collected entry on the foreach state so a subsequent resume can
+		// reconstruct outputs from iterations that completed before the
+		// interruption — without this, a mid-loop resume would silently
+		// drop pre-resume entries when storeCollected runs at the end.
 		if loop.Collect != "" && len(iterResult) > 0 {
 			lastResult := iterResult[len(iterResult)-1]
+			var collectedValue interface{}
 			if lastResult.ParsedData != nil {
-				result.Collected = append(result.Collected, lastResult.ParsedData)
+				collectedValue = lastResult.ParsedData
 			} else if lastResult.Output != "" {
-				result.Collected = append(result.Collected, lastResult.Output)
+				collectedValue = lastResult.Output
+			}
+			if collectedValue != nil {
+				result.Collected = append(result.Collected, collectedValue)
+				le.executor.appendForeachCollectedOutput(step.ID, collectedValue)
+				le.executor.persistState()
 			}
 		}
 
