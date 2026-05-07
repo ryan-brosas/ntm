@@ -47,7 +47,7 @@ func TestCoverageAggregateForeachErrorsCancelledAndFallbacks(t *testing.T) {
 	if err := json.Unmarshal([]byte(cancelledOnly.Details), &summaries); err != nil {
 		t.Fatalf("aggregate details are not JSON: %v", err)
 	}
-	if len(summaries) != 1 || summaries[0].Iteration != 2 || summaries[0].Type != "cancelled" {
+	if len(summaries) != 1 || summaries[0].Iteration == nil || *summaries[0].Iteration != 2 || summaries[0].Type != "cancelled" {
 		t.Fatalf("aggregate summaries = %#v, want cancelled iteration 2", summaries)
 	}
 

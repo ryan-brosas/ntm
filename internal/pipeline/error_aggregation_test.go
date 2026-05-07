@@ -134,3 +134,36 @@ func TestParallelAggregatesMultipleSubstepFailures(t *testing.T) {
 		t.Fatalf("details = %q, want both failed sub-step IDs", result.Error.Details)
 	}
 }
+
+// TestForeachAggregateErrorIncludesIterationZero is the bd-u92d2 regression:
+// when the foreach failure happens at index 0 the JSON details must still
+// carry "iteration":0 instead of omitting the field via json:",omitempty".
+func TestForeachAggregateErrorIncludesIterationZero(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "foreach-iter-zero-aggregation",
+		Settings:      DefaultWorkflowSettings(),
+	}
+	step := &Step{
+		ID:      "fanout",
+		OnError: ErrorActionContinue,
+		Foreach: &ForeachConfig{
+			Items: `["bad-0","ok-1"]`,
+			Steps: []Step{{
+				ID:      "maybe",
+				Command: `case '${item}' in bad-*) echo '${item} failed'; exit 7;; *) printf '%s' '${item}';; esac`,
+			}},
+		},
+	}
+	workflow.Steps = []Step{*step}
+	e := createForeachTestExecutor(t, workflow)
+
+	result := e.executeForeach(context.Background(), step, workflow)
+
+	if result.Error == nil {
+		t.Fatal("foreach error = nil, want aggregate error metadata")
+	}
+	if !strings.Contains(result.Error.Details, `"iteration":0`) {
+		t.Fatalf("details = %q, want iteration zero preserved (bd-u92d2)", result.Error.Details)
+	}
+}

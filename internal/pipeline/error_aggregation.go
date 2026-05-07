@@ -7,7 +7,10 @@ import (
 )
 
 type aggregatedErrorSummary struct {
-	Iteration int    `json:"iteration,omitempty"`
+	// Iteration is a pointer so the foreach path can preserve iteration 0
+	// while the parallel path (which has no iteration concept) leaves it
+	// unset and out of the serialized JSON details (bd-u92d2).
+	Iteration *int   `json:"iteration,omitempty"`
 	StepID    string `json:"step_id,omitempty"`
 	Type      string `json:"type,omitempty"`
 	Message   string `json:"message"`
@@ -22,8 +25,9 @@ func aggregateForeachErrors(iterations []foreachIterationResult, stepID string, 
 			continue
 		}
 		entries = append(entries, entry)
+		idx := iteration.Index
 		summaries = append(summaries, aggregatedErrorSummary{
-			Iteration: iteration.Index,
+			Iteration: &idx,
 			Type:      entry.Type,
 			Message:   entry.Message,
 		})
@@ -35,8 +39,9 @@ func aggregateForeachErrors(iterations []foreachIterationResult, stepID string, 
 				continue
 			}
 			entries = append(entries, entry)
+			idx := iteration.Index
 			summaries = append(summaries, aggregatedErrorSummary{
-				Iteration: iteration.Index,
+				Iteration: &idx,
 				Type:      entry.Type,
 				Message:   entry.Message,
 			})
