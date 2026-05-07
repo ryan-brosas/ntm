@@ -304,15 +304,31 @@ func matchBeadFilterClause(record BeadRecord, rawClause string) (bool, error) {
 		return false, fmt.Errorf("empty filter clause")
 	}
 
-	op := "=="
-	parts := strings.SplitN(clause, "==", 2)
-	if len(parts) != 2 {
-		op = "!="
-		parts = strings.SplitN(clause, "!=", 2)
+	// bd-o4ji9: detect the operator by the earliest occurrence of `==` or
+	// `!=`. Preferring `==` regardless of position mis-parsed clauses like
+	// `field!=foo==bar`, where SplitN(clause, "==", 2) splits cleanly into
+	// two parts but locks `op` to `==` and assigns the literal `field!=foo`
+	// as the field name.
+	eqIdx := strings.Index(clause, "==")
+	neIdx := strings.Index(clause, "!=")
+	op := ""
+	splitIdx := -1
+	switch {
+	case eqIdx >= 0 && neIdx >= 0:
+		if eqIdx <= neIdx {
+			op, splitIdx = "==", eqIdx
+		} else {
+			op, splitIdx = "!=", neIdx
+		}
+	case eqIdx >= 0:
+		op, splitIdx = "==", eqIdx
+	case neIdx >= 0:
+		op, splitIdx = "!=", neIdx
 	}
-	if len(parts) != 2 {
+	if splitIdx < 0 {
 		return false, fmt.Errorf("unsupported filter clause %q", clause)
 	}
+	parts := []string{clause[:splitIdx], clause[splitIdx+2:]}
 
 	// bd-6uylc: beadRecordField lowercases the field internally, so the
 	// label/labels list-membership branch must compare against the same

@@ -327,6 +327,50 @@ func TestBeadQueryBrErrorFailsStep(t *testing.T) {
 	}
 }
 
+// TestMatchBeadFilterClause_OperatorByFirstOccurrence covers bd-o4ji9:
+// when both `==` and `!=` appear in a clause, the operator is the one
+// that appears first. Previously `==` was always preferred, so a clause
+// like `priority!=1==broken` parsed `priority!=1` as the field and
+// failed with "unknown bead field".
+func TestMatchBeadFilterClause_OperatorByFirstOccurrence(t *testing.T) {
+	record := BeadRecord{
+		ID:       "bd-test",
+		Priority: 1,
+	}
+	cases := []struct {
+		clause  string
+		want    bool
+		wantErr bool
+	}{
+		{clause: "priority!=2", want: true},
+		{clause: "priority==1", want: true},
+		// Earliest operator wins: with `!=` first, the LHS is `priority`
+		// and the RHS is the literal `1==something`. priority field is
+		// "1", so "priority != 1==something" → not equal, true.
+		{clause: "priority!=1==something", want: true},
+		// `==` first, LHS is `priority`, RHS is `2!=junk`. priority is
+		// "1", so equality with literal "2!=junk" → false.
+		{clause: "priority==2!=junk", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.clause, func(t *testing.T) {
+			got, err := matchBeadFilterClause(record, tc.clause)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("matchBeadFilterClause(%q) err = nil, want error", tc.clause)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("matchBeadFilterClause(%q) err = %v", tc.clause, err)
+			}
+			if got != tc.want {
+				t.Errorf("matchBeadFilterClause(%q) = %v, want %v", tc.clause, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestMatchBeadFilterClause_LabelCaseInsensitive covers bd-6uylc: the
 // `label`/`labels` list-membership branch was case-sensitive on the field
 // name, so `Label==alpha` silently returned false even when the record had
