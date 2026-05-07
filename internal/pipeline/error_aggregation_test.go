@@ -135,6 +135,41 @@ func TestParallelAggregatesMultipleSubstepFailures(t *testing.T) {
 	}
 }
 
+// TestForeachStructuredFailureDetails covers bd-wio84: foreach failures must
+// emit kind=foreach / step_id=... / reason=... details that mirror the
+// stepRuntimeError contract used by command and template steps.
+func TestForeachStructuredFailureDetails(t *testing.T) {
+	t.Run("source failure", func(t *testing.T) {
+		got := foreachStructuredError("fanout", "foreach_source", "boom", "")
+		if got.Type != "foreach_source" {
+			t.Errorf("Type = %q, want foreach_source", got.Type)
+		}
+		for _, want := range []string{"kind=foreach", "step_id=fanout", "reason=boom"} {
+			if !strings.Contains(got.Details, want) {
+				t.Errorf("Details %q missing %q", got.Details, want)
+			}
+		}
+	})
+	t.Run("limit failure", func(t *testing.T) {
+		got := foreachStructuredError("fanout", "limit", "200 iterations exceed max_foreach_iterations 100", "shrink the source")
+		if !strings.Contains(got.Details, "hint=shrink the source") {
+			t.Errorf("Details %q missing hint", got.Details)
+		}
+	})
+	t.Run("iteration failure carries iteration index", func(t *testing.T) {
+		got := foreachStructuredErrorAtIteration("fanout", "foreach", "iter-3 failed", "", 3)
+		if !strings.Contains(got.Details, "iteration=3") {
+			t.Errorf("Details %q missing iteration=3", got.Details)
+		}
+	})
+	t.Run("iteration index omitted when negative", func(t *testing.T) {
+		got := foreachStructuredErrorAtIteration("fanout", "foreach", "no iter info", "", -1)
+		if strings.Contains(got.Details, "iteration=") {
+			t.Errorf("Details %q should not include iteration field", got.Details)
+		}
+	})
+}
+
 // TestForeachAggregateErrorIncludesIterationZero is the bd-u92d2 regression:
 // when the foreach failure happens at index 0 the JSON details must still
 // carry "iteration":0 instead of omitting the field via json:",omitempty".

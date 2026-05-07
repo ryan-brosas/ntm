@@ -75,11 +75,9 @@ func (e *Executor) executeForeach(ctx context.Context, step *Step, workflow *Wor
 	}
 	if len(items) > e.limits.MaxForeachIterations {
 		result.Status = StatusFailed
-		result.Error = &StepError{
-			Type:      "limit",
-			Message:   fmt.Sprintf("foreach step %q has %d iterations, exceeding max_foreach_iterations %d", step.ID, len(items), e.limits.MaxForeachIterations),
-			Timestamp: time.Now(),
-		}
+		result.Error = foreachStructuredError(step.ID, "limit",
+			fmt.Sprintf("%d iterations exceed max_foreach_iterations %d", len(items), e.limits.MaxForeachIterations),
+			"raise pipeline limits.max_foreach_iterations or shrink the iteration source")
 		result.SkipKind = SkipKindLimit
 		result.FinishedAt = time.Now()
 		return result
@@ -134,11 +132,7 @@ func (e *Executor) executeForeach(ctx context.Context, step *Step, workflow *Wor
 	}
 	if ctx.Err() != nil {
 		result.Status = StatusCancelled
-		result.Error = &StepError{
-			Type:      "cancelled",
-			Message:   fmt.Sprintf("foreach step %q cancelled", step.ID),
-			Timestamp: time.Now(),
-		}
+		result.Error = foreachStructuredError(step.ID, "cancelled", "context cancelled", "")
 		return result
 	}
 	result.Status = StatusCompleted
@@ -1151,24 +1145,51 @@ func firstForeachError(iterations []foreachIterationResult, stepID string) *Step
 		if message == "" {
 			message = "iteration failed"
 		}
-		return &StepError{
-			Type:      "foreach",
-			Message:   fmt.Sprintf("foreach step %q failed at iteration %d: %s", stepID, iteration.Index, message),
-			Timestamp: time.Now(),
-		}
+		// bd-wio84: structured per-iteration failure metadata.
+		return foreachStructuredErrorAtIteration(stepID, "foreach", message, "", iteration.Index)
 	}
-	return &StepError{
-		Type:      "foreach",
-		Message:   fmt.Sprintf("foreach step %q failed", stepID),
-		Timestamp: time.Now(),
-	}
+	return foreachStructuredError(stepID, "foreach", "iteration failure with no detail", "")
 }
 
 func finishForeachFailure(result StepResult, typ, message string) StepResult {
+	// bd-wio84: emit the same kind=foreach step_id=... reason=... details
+	// shape that stepRuntimeError produces for command/template steps so
+	// robot consumers and operators get structured foreach failure
+	// metadata instead of a bare message.
 	result.Status = StatusFailed
-	result.Error = &StepError{Type: typ, Message: message, Timestamp: time.Now()}
+	result.Error = foreachStructuredError(result.StepID, typ, message, "")
 	result.FinishedAt = time.Now()
 	return result
+}
+
+// foreachStructuredError builds a StepError whose Details encodes
+// kind=foreach, step_id, reason, and (when available) the failing
+// iteration index. Mirrors stepRuntimeError so the runtime-error contract
+// from bd-tld34 covers foreach failures (bd-wio84).
+func foreachStructuredError(stepID, typ, reason, hint string) *StepError {
+	return foreachStructuredErrorAtIteration(stepID, typ, reason, hint, -1)
+}
+
+func foreachStructuredErrorAtIteration(stepID, typ, reason, hint string, iter int) *StepError {
+	parts := []string{
+		"kind=foreach",
+		"step_id=" + stepID,
+		"reason=" + reason,
+	}
+	message := fmt.Sprintf("foreach step %q failed: %s", stepID, reason)
+	if iter >= 0 {
+		parts = append(parts, fmt.Sprintf("iteration=%d", iter))
+		message = fmt.Sprintf("foreach step %q failed at iteration %d: %s", stepID, iter, reason)
+	}
+	if hint != "" {
+		parts = append(parts, "hint="+hint)
+	}
+	return &StepError{
+		Type:      typ,
+		Message:   message,
+		Details:   strings.Join(parts, " "),
+		Timestamp: time.Now(),
+	}
 }
 
 func skippedForeachIteration(plan foreachIterationPlan) foreachIterationResult {

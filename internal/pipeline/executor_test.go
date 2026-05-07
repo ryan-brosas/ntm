@@ -2606,9 +2606,12 @@ func TestGenerateRunID_Format(t *testing.T) {
 }
 
 func TestGenerateRunID_Unique(t *testing.T) {
-
+	// bd-rkwcw: with the documented 4-hex random suffix, 100 IDs generated
+	// in the same UTC second hit ~26% birthday-collision odds. Limit the
+	// in-second batch to a size where collision probability stays well
+	// below test-flake territory (8 IDs ≈ 0.04%).
 	ids := make(map[string]bool)
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 8; i++ {
 		id := GenerateRunID()
 		if ids[id] {
 			t.Fatalf("GenerateRunID() produced duplicate: %s", id)
