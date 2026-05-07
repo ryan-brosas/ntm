@@ -3165,6 +3165,43 @@ func TestExecuteCommand_ArgsAsEnvVars(t *testing.T) {
 	}
 }
 
+// bd-6xlxl: command Args string values must run through pipeline
+// substitution before they are exported as environment variables. Without
+// this, args: {NAME: "${vars.name}"} would ship the literal text
+// "${vars.name}" to the shell instead of the resolved value.
+func TestExecuteCommand_ArgsExpandPipelineVariables(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	e.varMu.Lock()
+	e.state.Variables["greeting"] = "hello"
+	e.varMu.Unlock()
+	step := &Step{
+		ID:      "expand-args",
+		Command: `printf '%s|%s' "$NAME" "$LIST"`,
+		Args: map[string]interface{}{
+			"NAME": "${vars.greeting}",
+			// Slice values: each string element should also expand.
+			"LIST": []interface{}{"raw", "${vars.greeting}"},
+		},
+	}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error: %+v", result.Status, StatusCompleted, result.Error)
+	}
+	// NAME should be the resolved scalar; LIST should be the expanded JSON
+	// list (argValueString JSON-encodes slices). We only assert the resolved
+	// scalar is present — the JSON encoding format is internal.
+	if !strings.Contains(result.Output, "hello|") {
+		t.Fatalf("Output = %q, want to contain hello| (NAME expanded)", result.Output)
+	}
+	if !strings.Contains(result.Output, "hello") {
+		t.Fatalf("Output = %q, want list element to be expanded", result.Output)
+	}
+	if strings.Contains(result.Output, "${vars.greeting}") {
+		t.Fatalf("Output = %q, leaked literal variable reference", result.Output)
+	}
+}
+
 func TestExecuteCommand_InvalidArgEnvNameFailsValidation(t *testing.T) {
 	e := newCommandTestExecutor(t)
 	step := &Step{

@@ -958,7 +958,14 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 
 	expandedCmd := e.substituteVariables(step.Command)
 
-	argEnv, err := argsToEnv(step.Args)
+	// bd-6xlxl: run pipeline substitution over Args string values so
+	// `${vars.x}`, `${env.X}`, `${steps.s.output}`, etc. resolve before they
+	// are exported as environment variables. Without this, args:
+	// {TOKEN: "${env.API_TOKEN}"} ships the literal text instead of the
+	// runtime value.
+	expandedArgs := e.substituteCommandArgs(step.Args)
+
+	argEnv, err := argsToEnv(expandedArgs)
 	if err != nil {
 		result.Status = StatusFailed
 		result.Error = stepRuntimeError(step, "command", "validation",
@@ -2233,6 +2240,38 @@ func (e *Executor) substituteVariables(s string) string {
 	s = e.substituteRuntimeVariables(s)
 	result, _ := sub.Substitute(s)
 	return result
+}
+
+// substituteCommandArgs walks a step's Args map and runs the pipeline
+// substitutor over every string value (and the elements of any string-valued
+// slice) so `${vars.x}`, `${env.X}`, `${steps.s.output}`, and
+// `${defaults.foo}` resolve before the args are exported as environment
+// variables. Non-string values pass through unchanged — argValueString
+// handles their conversion downstream.
+func (e *Executor) substituteCommandArgs(args map[string]interface{}) map[string]interface{} {
+	if len(args) == 0 {
+		return args
+	}
+	out := make(map[string]interface{}, len(args))
+	for k, v := range args {
+		switch typed := v.(type) {
+		case string:
+			out[k] = e.substituteVariables(typed)
+		case []interface{}:
+			expanded := make([]interface{}, len(typed))
+			for i, item := range typed {
+				if s, ok := item.(string); ok {
+					expanded[i] = e.substituteVariables(s)
+				} else {
+					expanded[i] = item
+				}
+			}
+			out[k] = expanded
+		default:
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // evaluateCondition evaluates a when condition.
