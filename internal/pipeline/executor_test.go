@@ -3789,3 +3789,168 @@ func TestLimitsConfig_EffectiveLimits_Override(t *testing.T) {
 		t.Errorf("other defaults should be preserved: MaxTemplateBytes=%d", lc.MaxTemplateBytes)
 	}
 }
+
+// bd-3uqce: outputs validation post-run.
+
+func TestExecutor_ValidateDeclaredOutputs_FoundAndMissing(t *testing.T) {
+	dir := t.TempDir()
+	present := filepath.Join(dir, "present.md")
+	if err := os.WriteFile(present, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write present output: %v", err)
+	}
+	missing := filepath.Join(dir, "missing.md")
+
+	cfg := DefaultExecutorConfig("test-session")
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:     "run-validate-outputs",
+		Variables: map[string]interface{}{},
+		Steps:     map[string]StepResult{},
+	}
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "outputs-validation",
+		Outputs: []OutputDecl{
+			{Name: "present_output", Path: present},
+			{Name: "missing_output", Path: missing},
+			{Name: "name_only_skipped"}, // no path → skipped, not counted
+		},
+	}
+
+	e.validateDeclaredOutputs(workflow)
+
+	if e.state.OutputValidation == nil {
+		t.Fatal("OutputValidation should be populated")
+	}
+	got := e.state.OutputValidation
+	if len(got.Found) != 1 || got.Found[0] != present {
+		t.Errorf("Found = %v, want [%s]", got.Found, present)
+	}
+	if len(got.Missing) != 1 || got.Missing[0] != missing {
+		t.Errorf("Missing = %v, want [%s]", got.Missing, missing)
+	}
+}
+
+func TestExecutor_ValidateDeclaredOutputs_SubstitutesVariables(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "report.md")
+	if err := os.WriteFile(target, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	cfg := DefaultExecutorConfig("test-session")
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:     "run-substitute",
+		Variables: map[string]interface{}{"workspace": dir},
+		Steps:     map[string]StepResult{},
+	}
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "outputs-subst",
+		Outputs: []OutputDecl{
+			{Name: "report", Path: "${vars.workspace}/report.md"},
+		},
+	}
+
+	e.validateDeclaredOutputs(workflow)
+
+	if e.state.OutputValidation == nil {
+		t.Fatal("OutputValidation should be populated")
+	}
+	if len(e.state.OutputValidation.Found) != 1 || e.state.OutputValidation.Found[0] != target {
+		t.Errorf("Found = %v, want [%s]", e.state.OutputValidation.Found, target)
+	}
+	if len(e.state.OutputValidation.Missing) != 0 {
+		t.Errorf("Missing = %v, want empty", e.state.OutputValidation.Missing)
+	}
+}
+
+func TestExecutor_ValidateDeclaredOutputs_NoOutputsLeavesStateNil(t *testing.T) {
+	cfg := DefaultExecutorConfig("test-session")
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:     "run-no-outputs",
+		Variables: map[string]interface{}{},
+		Steps:     map[string]StepResult{},
+	}
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "no-outputs",
+	}
+
+	e.validateDeclaredOutputs(workflow)
+
+	if e.state.OutputValidation != nil {
+		t.Errorf("OutputValidation should remain nil when workflow declares no outputs, got %+v", e.state.OutputValidation)
+	}
+}
+
+func TestExecutor_ValidateDeclaredOutputs_DryRunSkipped(t *testing.T) {
+	dir := t.TempDir()
+	cfg := DefaultExecutorConfig("test-session")
+	cfg.DryRun = true
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:     "run-dryrun",
+		Variables: map[string]interface{}{},
+		Steps:     map[string]StepResult{},
+	}
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "outputs-dryrun",
+		Outputs: []OutputDecl{
+			{Name: "missing", Path: filepath.Join(dir, "never-written.md")},
+		},
+	}
+
+	e.validateDeclaredOutputs(workflow)
+
+	if e.state.OutputValidation != nil {
+		t.Errorf("OutputValidation should be nil in dry-run, got %+v", e.state.OutputValidation)
+	}
+}
+
+func TestExecutor_Run_PopulatesOutputValidation(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "deliverable.md")
+	if err := os.WriteFile(target, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("write deliverable: %v", err)
+	}
+	missing := filepath.Join(dir, "absent.md")
+
+	cfg := DefaultExecutorConfig("test-session")
+	cfg.DryRun = false
+	e := NewExecutor(cfg)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "run-output-validation",
+		Settings:      DefaultWorkflowSettings(),
+		Outputs: []OutputDecl{
+			{Name: "deliverable", Path: target},
+			{Name: "absent", Path: missing},
+		},
+		Steps: []Step{
+			{ID: "noop", Command: "true"},
+		},
+	}
+
+	state, err := e.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error: %v", err)
+	}
+	if state.OutputValidation == nil {
+		t.Fatal("Run() should populate OutputValidation when workflow declares outputs")
+	}
+	if len(state.OutputValidation.Found) != 1 || state.OutputValidation.Found[0] != target {
+		t.Errorf("Found = %v, want [%s]", state.OutputValidation.Found, target)
+	}
+	if len(state.OutputValidation.Missing) != 1 || state.OutputValidation.Missing[0] != missing {
+		t.Errorf("Missing = %v, want [%s]", state.OutputValidation.Missing, missing)
+	}
+}

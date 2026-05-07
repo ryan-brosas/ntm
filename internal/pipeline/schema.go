@@ -37,7 +37,9 @@ type Workflow struct {
 	Defaults map[string]interface{} `yaml:"defaults,omitempty" toml:"defaults,omitempty" json:"defaults,omitempty"`
 
 	// Outputs declares the names of artifacts/values this workflow produces.
-	// Currently informational; the executor doesn't enforce them.
+	// Validated post-run by Executor.validateDeclaredOutputs (bd-3uqce):
+	// each entry's Path is variable-substituted and stat()-checked. Missing
+	// paths produce slog warnings but never flip pipeline status.
 	Outputs []OutputDecl `yaml:"outputs,omitempty" toml:"outputs,omitempty" json:"outputs,omitempty"`
 
 	// Global settings
@@ -1316,6 +1318,20 @@ type ExecutionState struct {
 	ParallelState    map[string]ParallelGroupState    `json:"parallel_state,omitempty"`
 	ScopeStack       []ScopeFrame                     `json:"scope_stack,omitempty"`
 	InFlightSteps    map[string]InFlightStepState     `json:"in_flight_steps,omitempty"`
+
+	// OutputValidation records the post-run check of Workflow.Outputs (bd-3uqce).
+	// nil when the workflow declared no outputs or validation was skipped (e.g.
+	// dry-run, cancelled). Missing paths are diagnostic only — they never flip
+	// the pipeline Status.
+	OutputValidation *OutputValidationResult `json:"output_validation,omitempty"`
+}
+
+// OutputValidationResult is the post-run summary of declared-output checks.
+// Found and Missing hold the variable-substituted paths in the same order as
+// Workflow.Outputs entries that had non-empty Path.
+type OutputValidationResult struct {
+	Found   []string `json:"found,omitempty"`
+	Missing []string `json:"missing,omitempty"`
 }
 
 // ExecutionError represents an error that occurred during execution

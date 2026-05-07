@@ -266,6 +266,9 @@ func (e *Executor) Run(ctx context.Context, workflow *Workflow, vars map[string]
 	// dispatches must run even when the main pipeline failed.
 	if ctx.Err() == nil {
 		e.runPostPipelineSteps(ctx, workflow)
+		// bd-3uqce: declared-output stat() pass after post-pipeline steps so
+		// any artifacts written by cleanup/handoff steps are still picked up.
+		e.validateDeclaredOutputs(workflow)
 	}
 
 	// Finalize state
@@ -566,6 +569,58 @@ func (e *Executor) Cancel() {
 	if e.cancelFn != nil {
 		e.cancelFn()
 	}
+}
+
+// validateDeclaredOutputs stat()-checks every Workflow.Outputs entry that has
+// a non-empty Path after variable substitution (bd-3uqce). Missing paths are
+// surfaced as slog warnings — they never flip the pipeline status. Skipped in
+// dry-run (no real artifacts would be written) and when the workflow declared
+// no outputs.
+func (e *Executor) validateDeclaredOutputs(workflow *Workflow) {
+	if workflow == nil || len(workflow.Outputs) == 0 {
+		return
+	}
+	if e.config.DryRun {
+		return
+	}
+
+	result := &OutputValidationResult{}
+	for _, decl := range workflow.Outputs {
+		if decl.Path == "" {
+			continue
+		}
+		resolved := e.substituteVariables(decl.Path)
+		if resolved == "" {
+			continue
+		}
+		if _, err := os.Stat(resolved); err == nil {
+			result.Found = append(result.Found, resolved)
+			continue
+		}
+		result.Missing = append(result.Missing, resolved)
+		slog.Warn("pipeline.output.missing",
+			"run_id", e.runIDForLog(),
+			"workflow", workflow.Name,
+			"name", decl.Name,
+			"path", resolved,
+		)
+	}
+
+	total := len(result.Found) + len(result.Missing)
+	if total == 0 {
+		return
+	}
+	slog.Info("pipeline.outputs.validated",
+		"run_id", e.runIDForLog(),
+		"workflow", workflow.Name,
+		"found", len(result.Found),
+		"total", total,
+		"summary", fmt.Sprintf("%d of %d declared outputs found", len(result.Found), total),
+	)
+
+	e.stateMu.Lock()
+	e.state.OutputValidation = result
+	e.stateMu.Unlock()
 }
 
 // executeWorkflow runs all steps in dependency order
