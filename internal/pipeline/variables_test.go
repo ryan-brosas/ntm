@@ -107,6 +107,23 @@ func TestPrepareWorkflowVariablesErrors(t *testing.T) {
 			}},
 			want: "cyclic default reference",
 		},
+		{
+			// A typo'd reference must fail closed rather than passing through
+			// as the literal "${vars.projet_name}" placeholder. Otherwise the
+			// unresolved marker enters execution and dispatches to prompts.
+			name: "default with typo'd vars reference",
+			workflow: &Workflow{Vars: map[string]VarDef{
+				"name": {Type: VarTypeString, Default: "${vars.projet_name}"},
+			}},
+			want: "default \"${vars.projet_name}\"",
+		},
+		{
+			name: "default with missing env reference",
+			workflow: &Workflow{Vars: map[string]VarDef{
+				"endpoint": {Type: VarTypeString, Default: "${env.NTM_TEST_DEFINITELY_UNSET_VAR_4o0rn}"},
+			}},
+			want: "environment variable",
+		},
 	}
 
 	for _, tt := range tests {
@@ -119,6 +136,25 @@ func TestPrepareWorkflowVariablesErrors(t *testing.T) {
 				t.Fatalf("PrepareWorkflowVariables() error = %v, want %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestPrepareWorkflowVariablesDefaultWithExplicitFallback(t *testing.T) {
+	// An explicit | fallback in the default keeps the existing escape hatch:
+	// authors who intentionally reference a variable that may be undefined can
+	// still provide a literal fallback. This case must continue to succeed.
+	workflow := &Workflow{
+		Vars: map[string]VarDef{
+			"name": {Type: VarTypeString, Default: `${vars.projet_name | "fallback-name"}`},
+		},
+	}
+
+	got, err := PrepareWorkflowVariables(workflow, nil)
+	if err != nil {
+		t.Fatalf("PrepareWorkflowVariables() error = %v, want nil for default with explicit fallback", err)
+	}
+	if got["name"] != "fallback-name" {
+		t.Fatalf("name = %#v, want %q", got["name"], "fallback-name")
 	}
 }
 

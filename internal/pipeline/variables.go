@@ -59,7 +59,11 @@ func PrepareWorkflowVariables(workflow *Workflow, overrides map[string]interface
 					return err
 				}
 			}
-			value = resolveDefaultString(s, vars)
+			resolved, err := resolveDefaultString(s, vars)
+			if err != nil {
+				return fmt.Errorf("variable %s: default %q: %w", name, s, err)
+			}
+			value = resolved
 		}
 
 		normalized, err := normalizeWorkflowVar(name, def.Type, value)
@@ -192,19 +196,26 @@ func variableDefaultRefs(s string) []string {
 	return refs
 }
 
-func resolveDefaultString(s string, vars map[string]interface{}) interface{} {
+// resolveDefaultString substitutes variable references inside a string-typed
+// workflow var default. Returns an error when the default contains an
+// unresolved reference (typo, missing variable, missing env) without an
+// explicit | fallback. Without this, a default like ${vars.projet_name}
+// would pass through as the literal placeholder and silently dispatch
+// unresolved ${...} markers to prompts/commands at runtime.
+func resolveDefaultString(s string, vars map[string]interface{}) (interface{}, error) {
 	state := &ExecutionState{Variables: vars}
 	sub := NewSubstitutor(state, "", "")
 	trimmed := strings.TrimSpace(s)
 	if match := varPattern.FindStringSubmatch(trimmed); len(match) == 2 && match[0] == trimmed {
 		if value, err := sub.resolveVar(match[1]); err == nil {
-			return value
+			return value, nil
 		}
 	}
-	if resolved, err := sub.Substitute(s); err == nil {
-		return resolved
+	resolved, err := sub.SubstituteStrict(s)
+	if err != nil {
+		return nil, err
 	}
-	return s
+	return resolved, nil
 }
 
 func normalizeWorkflowVar(name string, typ VarType, value interface{}) (interface{}, error) {
