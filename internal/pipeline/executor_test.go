@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -2581,9 +2582,26 @@ func TestGenerateRunID_Format(t *testing.T) {
 	if !strings.HasPrefix(id, "run-") {
 		t.Errorf("GenerateRunID() = %q, should start with 'run-'", id)
 	}
+	// bd-rkwcw: the documented contract is run-<UTC-YYYYMMDD-HHMMSS>-<4-hex>
+	// with the trailing field being exactly 4 lowercase hex characters.
+	pattern := regexp.MustCompile(`^run-\d{8}-\d{6}-[0-9a-f]{4}$`)
+	if !pattern.MatchString(id) {
+		t.Errorf("GenerateRunID() = %q, want pattern %s", id, pattern)
+	}
 	parts := strings.Split(id, "-")
-	if len(parts) < 3 {
-		t.Errorf("GenerateRunID() = %q, expected at least 3 parts separated by '-'", id)
+	if len(parts) != 4 {
+		t.Errorf("GenerateRunID() = %q, expected exactly 4 dash-separated parts", id)
+	}
+
+	// Timestamp must parse back as UTC.
+	if len(parts) >= 4 {
+		stamp := parts[1] + "-" + parts[2]
+		parsed, err := time.ParseInLocation("20060102-150405", stamp, time.UTC)
+		if err != nil {
+			t.Errorf("GenerateRunID timestamp = %q, parse error: %v", stamp, err)
+		} else if delta := time.Since(parsed.UTC()); delta < -time.Minute || delta > 5*time.Minute {
+			t.Errorf("GenerateRunID timestamp drift = %s, want within a few minutes of now", delta)
+		}
 	}
 }
 

@@ -3149,13 +3149,17 @@ func generateRunID() string {
 	return GenerateRunID()
 }
 
-// GenerateRunID creates a unique run ID using timestamp and random bytes (exported)
+// GenerateRunID creates a unique run ID using a UTC timestamp and 2 random
+// bytes encoded as 4 lowercase hex chars: run-<UTC-YYYYMMDD-HHMMSS>-<4-hex>.
+// This matches the state-file naming contract documented for bd-5122b
+// (bd-rkwcw fixed the missing UTC + width).
 func GenerateRunID() string {
-	timestamp := time.Now().Format("20060102-150405")
-	randBytes := make([]byte, 4)
+	timestamp := time.Now().UTC().Format("20060102-150405")
+	randBytes := make([]byte, 2)
 	if _, err := rand.Read(randBytes); err != nil {
-		// Fallback to timestamp-based if crypto/rand fails
-		return fmt.Sprintf("run-%s-%x", timestamp, time.Now().UnixNano()%0xffffffff)
+		// Fallback to a clock-derived 4-hex if crypto/rand fails so we
+		// stay inside the documented format.
+		return fmt.Sprintf("run-%s-%04x", timestamp, time.Now().UTC().UnixNano()&0xffff)
 	}
 	return fmt.Sprintf("run-%s-%s", timestamp, hex.EncodeToString(randBytes))
 }
