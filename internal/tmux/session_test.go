@@ -239,8 +239,11 @@ func TestListSessions(t *testing.T) {
 func TestGetAllPanes_NoServerReturnsEmpty(t *testing.T) {
 	skipIfNoTmux(t)
 
-	// Point tmux at an empty socket directory so no server exists.
+	// Point tmux at an empty socket directory so no server exists. Also
+	// neutralize TMUX so a CI/agent shell that already lives inside a tmux
+	// server cannot leak its panes into list-panes -a (bd-wt9d4).
 	t.Setenv("TMUX_TMPDIR", t.TempDir())
+	t.Setenv("TMUX", "")
 
 	panes, err := GetAllPanes()
 	if err != nil {
