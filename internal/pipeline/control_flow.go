@@ -299,6 +299,7 @@ func (e *Executor) executeOnFailureAction(step *Step, failed StepResult) StepRes
 	failed.Status = StatusSkipped
 	failed.Error = nil
 	failed.SkipReason = fmt.Sprintf("on_failure set ${%s}=%q", variableRef, action)
+	failed.SkipKind = SkipKindOnFailureAction
 	failed.FinishedAt = time.Now()
 	return failed
 }

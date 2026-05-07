@@ -604,6 +604,12 @@ func TestOnFailureActionSetsRuntimeVariableAndSkipsOriginalFailure(t *testing.T)
 	if !strings.Contains(register.SkipReason, "${runtime.register_mail_failure_action}") {
 		t.Fatalf("register_mail SkipReason = %q, want runtime variable reference", register.SkipReason)
 	}
+	// bd-2ytru: on_failure recovery must set a structured SkipKind so the
+	// step is distinguishable from unclassified skips in robot output and
+	// persisted state.
+	if register.SkipKind != SkipKindOnFailureAction {
+		t.Fatalf("register_mail SkipKind = %q, want %q", register.SkipKind, SkipKindOnFailureAction)
+	}
 	if got := state.Variables["runtime.register_mail_failure_action"]; got != "fallback_to_ntm_inbox" {
 		t.Fatalf("runtime failure action = %v, want fallback_to_ntm_inbox", got)
 	}

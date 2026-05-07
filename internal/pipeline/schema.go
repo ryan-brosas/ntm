@@ -1225,6 +1225,10 @@ const (
 	SkipKindForeachBreak     SkipKind = "foreach_loop_control_break_after"
 	SkipKindCancelled        SkipKind = "cancelled"
 	SkipKindLimit            SkipKind = "resource_limit_exceeded"
+	// SkipKindOnFailureAction tags a step that failed but was recovered into
+	// StatusSkipped by on_failure setting a runtime variable (bd-2ytru).
+	// Distinguishes user-driven recovery from unclassified skips.
+	SkipKindOnFailureAction SkipKind = "on_failure_action"
 )
 
 // StepResult contains the result of executing a step
