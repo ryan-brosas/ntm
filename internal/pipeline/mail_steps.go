@@ -3,6 +3,7 @@ package pipeline
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 // MailSendStep describes a first-class MCP Agent Mail send operation.
@@ -41,6 +42,38 @@ type FileReservationReleaseStep struct {
 	ProjectKey string       `yaml:"project_key,omitempty" toml:"project_key,omitempty" json:"project_key,omitempty"`
 	AgentName  string       `yaml:"agent_name,omitempty" toml:"agent_name,omitempty" json:"agent_name,omitempty"`
 	Paths      StringOrList `yaml:"paths,omitempty" toml:"paths,omitempty" json:"paths,omitempty"`
+}
+
+// hasMailStep reports whether the step is configured as any of the Agent Mail
+// dispatch kinds. The runtime executor uses this to short-circuit the prompt
+// dispatch path so authors get a structured "not implemented" skip instead of
+// a misleading "step has no prompt or prompt_file" failure (bd-hz1tl).
+func (s *Step) hasMailStep() bool {
+	if s == nil {
+		return false
+	}
+	return s.MailSend != nil ||
+		s.FileReservationPaths != nil ||
+		s.MailInboxCheck != nil ||
+		s.FileReservationRelease != nil
+}
+
+// executeMailStep is the executor dispatch branch for Agent Mail step kinds.
+// MCP Agent Mail integration is pending (bd-b5l8d follow-on); until then the
+// step is recorded as Skipped with SkipKindNotImplemented and a SkipReason
+// naming the kinds the author requested.
+func executeMailStep(step *Step) StepResult {
+	now := time.Now()
+	result := StepResult{
+		StepID:     step.ID,
+		Status:     StatusSkipped,
+		StartedAt:  now,
+		FinishedAt: now,
+		SkipKind:   SkipKindNotImplemented,
+		SkipReason: fmt.Sprintf("Agent Mail step kinds (%s) are validated but not yet executed; pending MCP integration.",
+			strings.Join(step.mailStepKindNames(), ",")),
+	}
+	return result
 }
 
 func (s *Step) mailStepKindNames() []string {

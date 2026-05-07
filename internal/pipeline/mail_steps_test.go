@@ -292,3 +292,68 @@ func TestMailSteps_ValidationAcceptsValid(t *testing.T) {
 		t.Fatalf("Validate() errors = %+v, want all four mail steps to validate", result.Errors)
 	}
 }
+
+func TestExecuteMailStep_NotImplementedSkip(t *testing.T) {
+	cases := []struct {
+		name   string
+		step   *Step
+		expect string
+	}{
+		{
+			name:   "mail_send",
+			step:   &Step{ID: "notify", MailSend: validMailSendStep()},
+			expect: "mail_send",
+		},
+		{
+			name:   "file_reservation_paths",
+			step:   &Step{ID: "lock", FileReservationPaths: &FileReservationPathsStep{ProjectKey: "/p", AgentName: "A", Paths: StringOrList{"a.go"}}},
+			expect: "file_reservation_paths",
+		},
+		{
+			name:   "mail_inbox_check",
+			step:   &Step{ID: "inbox", MailInboxCheck: &MailInboxCheckStep{ProjectKey: "/p", AgentName: "A"}},
+			expect: "mail_inbox_check",
+		},
+		{
+			name:   "file_reservation_release",
+			step:   &Step{ID: "release", FileReservationRelease: &FileReservationReleaseStep{ProjectKey: "/p", AgentName: "A", Paths: StringOrList{"a.go"}}},
+			expect: "file_reservation_release",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if !tc.step.hasMailStep() {
+				t.Fatal("hasMailStep() = false; want true")
+			}
+			result := executeMailStep(tc.step)
+			if result.Status != StatusSkipped {
+				t.Errorf("Status = %q, want StatusSkipped", result.Status)
+			}
+			if result.SkipKind != SkipKindNotImplemented {
+				t.Errorf("SkipKind = %q, want %q", result.SkipKind, SkipKindNotImplemented)
+			}
+			if !strings.Contains(result.SkipReason, tc.expect) {
+				t.Errorf("SkipReason = %q, want it to mention %q", result.SkipReason, tc.expect)
+			}
+			if result.StartedAt.IsZero() || result.FinishedAt.IsZero() {
+				t.Errorf("StartedAt/FinishedAt should be populated; got %v / %v", result.StartedAt, result.FinishedAt)
+			}
+			if result.Error != nil {
+				t.Errorf("Error = %v, want nil for skipped not-implemented mail steps", result.Error)
+			}
+		})
+	}
+}
+
+func TestStep_HasMailStep_FalseWhenAbsent(t *testing.T) {
+	if (&Step{ID: "x", Command: "/bin/true"}).hasMailStep() {
+		t.Errorf("hasMailStep() returned true for command step")
+	}
+	if (&Step{ID: "x", Prompt: "hello"}).hasMailStep() {
+		t.Errorf("hasMailStep() returned true for prompt step")
+	}
+	if (*Step)(nil).hasMailStep() {
+		t.Errorf("hasMailStep() on nil receiver returned true")
+	}
+}
