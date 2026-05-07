@@ -159,6 +159,28 @@ func TestByModelFamilyDifferenceErrorsWhenNoPanesAvailable(t *testing.T) {
 	}
 }
 
+func TestByModelFamilyDifferenceErrorsWhenAuthorFamilyMissing(t *testing.T) {
+	// An item that lacks author_model/model_family/family/type yields an empty
+	// author family. byModelFamilyDifference must reject that input rather than
+	// silently routing to the first available pane, which would defeat the
+	// cross-family adversarial contract used by brenner / devils-advocate flows.
+	panes := []paneStrategyPane{
+		{ID: "p1", ModelFamily: "cc"},
+		{ID: "p2", ModelFamily: "codex"},
+	}
+
+	got, warned, err := byModelFamilyDifference(panes, "")
+	if !errors.Is(err, errNoModelFamilyPane) {
+		t.Fatalf("byModelFamilyDifference() error = %v, want %v", err, errNoModelFamilyPane)
+	}
+	if warned {
+		t.Fatal("byModelFamilyDifference() warned = true, want false on missing-family error")
+	}
+	if got != "" {
+		t.Fatalf("byModelFamilyDifference() = %q, want empty pane", got)
+	}
+}
+
 func TestRoundRobinByDomainReturnsOwningPane(t *testing.T) {
 	panes := []paneStrategyPane{
 		{ID: "p2", Domains: []string{"H-001", "H-005"}},

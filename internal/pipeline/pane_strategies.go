@@ -84,7 +84,15 @@ func byModelFamily(orderedPanes []paneStrategyPane, modelFamily string) (string,
 // byModelFamilyDifference chooses the first pane whose model family differs
 // from the item's authoring family. If every pane has the same family, it
 // falls back to the first available pane and reports warnFallback=true.
+//
+// An empty authorModelFamily is rejected: without a baseline the strategy
+// cannot enforce the cross-family adversarial contract and would otherwise
+// silently route to the first non-empty-family pane. Mirrors byModelFamily's
+// missing-family behavior.
 func byModelFamilyDifference(orderedPanes []paneStrategyPane, authorModelFamily string) (paneID string, warnFallback bool, err error) {
+	if authorModelFamily == "" {
+		return "", false, errNoModelFamilyPane
+	}
 	firstPane := ""
 	for _, pane := range orderedPanes {
 		if !pane.available() {
