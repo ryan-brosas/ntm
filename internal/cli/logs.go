@@ -361,6 +361,8 @@ func logsAgentTypeColor(agentType string, th theme.Theme) lipgloss.Color {
 		return th.Windsurf
 	case agent.AgentTypeAider:
 		return th.Aider
+	case agent.AgentTypeOpencode:
+		return th.Opencode
 	case agent.AgentTypeOllama:
 		return th.Ollama
 	case agent.AgentTypeUser:

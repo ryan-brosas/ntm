@@ -579,6 +579,8 @@ func activityAgentTypeColor(agentType string, t theme.Theme) lipgloss.Color {
 		return t.Windsurf
 	case agent.AgentTypeAider:
 		return t.Aider
+	case agent.AgentTypeOpencode:
+		return t.Opencode
 	case agent.AgentTypeOllama:
 		return t.Ollama
 	case agent.AgentTypeUser:

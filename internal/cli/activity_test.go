@@ -219,6 +219,8 @@ func TestActivityAgentTypeColor(t *testing.T) {
 		{"cursor", "cursor", string(current.Cursor)},
 		{"windsurf alias", "ws", string(current.Windsurf)},
 		{"aider", "aider", string(current.Aider)},
+		{"opencode short", "oc", string(current.Opencode)},
+		{"opencode long", "opencode", string(current.Opencode)},
 		{"ollama", "ollama", string(current.Ollama)},
 		{"user", "user", string(current.User)},
 		{"unknown", "mystery", string(current.Text)},

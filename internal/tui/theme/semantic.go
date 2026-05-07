@@ -54,6 +54,7 @@ type SemanticPalette struct {
 	AgentCursor   lipgloss.Color // Cursor (teal)
 	AgentWindsurf lipgloss.Color // Windsurf (flamingo)
 	AgentAider    lipgloss.Color // Aider (peach)
+	AgentOpencode lipgloss.Color // Opencode (lavender)
 	AgentOllama   lipgloss.Color // Ollama (green)
 	AgentUser     lipgloss.Color // User pane (green)
 	AgentUnknown  lipgloss.Color // Unknown agent type
@@ -125,6 +126,7 @@ func (t Theme) Semantic() SemanticPalette {
 		AgentCursor:   t.Cursor,
 		AgentWindsurf: t.Windsurf,
 		AgentAider:    t.Aider,
+		AgentOpencode: t.Opencode,
 		AgentOllama:   t.Ollama,
 		AgentUser:     t.User,
 		AgentUnknown:  t.Overlay,
@@ -171,6 +173,8 @@ func (p SemanticPalette) AgentColor(agentType string) lipgloss.Color {
 		return p.AgentWindsurf
 	case agent.AgentTypeAider:
 		return p.AgentAider
+	case agent.AgentTypeOpencode:
+		return p.AgentOpencode
 	case agent.AgentTypeOllama:
 		return p.AgentOllama
 	case agent.AgentTypeUser:
