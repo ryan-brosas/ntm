@@ -2249,6 +2249,7 @@ func (e *Executor) substituteVariables(s string) string {
 	defer e.stateMu.RUnlock()
 	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
 	sub.SetDefaults(e.defaults)
+	sub.SetMaxDepth(e.limits.MaxSubstitutionDepth)
 	s = e.substituteRuntimeVariables(s)
 	result, _ := sub.Substitute(s)
 	return result
@@ -2303,6 +2304,7 @@ func (e *Executor) evaluateCondition(condition string) (bool, error) {
 	defer e.stateMu.RUnlock()
 	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
 	sub.SetDefaults(e.defaults)
+	sub.SetMaxDepth(e.limits.MaxSubstitutionDepth)
 	condition = e.substituteRuntimeVariables(condition)
 	return EvaluateCondition(condition, sub)
 }

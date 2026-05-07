@@ -196,6 +196,7 @@ func (e *Executor) substituteStrict(s string) (string, error) {
 	defer e.stateMu.RUnlock()
 	sub := NewSubstitutor(e.state, e.config.Session, e.state.WorkflowID)
 	sub.SetDefaults(e.defaults)
+	sub.SetMaxDepth(e.limits.MaxSubstitutionDepth)
 	s = e.substituteRuntimeVariables(s)
 	return sub.SubstituteStrict(s)
 }

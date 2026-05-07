@@ -544,6 +544,7 @@ func (le *LoopExecutor) substituteIntExpr(expr string) (string, error) {
 	}
 	sub := NewSubstitutor(le.executor.state, le.executor.config.Session, workflowID)
 	sub.SetDefaults(le.executor.defaults)
+	sub.SetMaxDepth(le.executor.limits.MaxSubstitutionDepth)
 	return sub.SubstituteStrict(le.executor.substituteRuntimeVariables(expr))
 }
 
@@ -662,6 +663,7 @@ func (le *LoopExecutor) resolveItems(expr string) ([]interface{}, error) {
 	// Try to resolve as a variable reference
 	sub := NewSubstitutor(le.executor.state, le.executor.config.Session, le.executor.state.WorkflowID)
 	sub.SetDefaults(le.executor.defaults)
+	sub.SetMaxDepth(le.executor.limits.MaxSubstitutionDepth)
 
 	// Strip ${ and } if present
 	varPath := resolved

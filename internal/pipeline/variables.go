@@ -312,6 +312,7 @@ type Substitutor struct {
 	session  string
 	workflow string
 	defaults map[string]interface{}
+	maxDepth int
 }
 
 // NewSubstitutor creates a new substitutor with the given execution context.
@@ -326,6 +327,22 @@ func NewSubstitutor(state *ExecutionState, session, workflow string) *Substituto
 // SetDefaults sets the workflow-level defaults map for ${defaults.X} resolution.
 func (s *Substitutor) SetDefaults(d map[string]interface{}) {
 	s.defaults = d
+}
+
+// SetMaxDepth sets the maximum recursion depth for nested substitutions.
+// A non-positive value falls back to DefaultMaxSubstitutionDepth at substitute
+// time. Callers should pass workflow.Settings.Limits.EffectiveLimits().MaxSubstitutionDepth
+// so user-configured `max_substitution_recursion` is honored.
+func (s *Substitutor) SetMaxDepth(d int) {
+	s.maxDepth = d
+}
+
+// effectiveMaxDepth returns the configured recursion bound or the package default.
+func (s *Substitutor) effectiveMaxDepth() int {
+	if s.maxDepth > 0 {
+		return s.maxDepth
+	}
+	return DefaultMaxSubstitutionDepth
 }
 
 // SubstitutionError represents an error during variable substitution
@@ -359,8 +376,9 @@ const escapedDollarPlaceholder = "\x00ESC_DOLLAR\x00"
 func (s *Substitutor) Substitute(template string) (string, error) {
 	result := protectEscapedSubstitutions(template)
 	var firstErr error
+	maxDepth := s.effectiveMaxDepth()
 
-	for depth := 0; depth < DefaultMaxSubstitutionDepth; depth++ {
+	for depth := 0; depth < maxDepth; depth++ {
 		next, err, resolved := s.substituteOnce(result)
 		next = protectEscapedSubstitutions(next)
 		if err != nil {
@@ -386,7 +404,7 @@ func (s *Substitutor) Substitute(template string) (string, error) {
 	}
 	return restoreEscapedSubstitutions(result), &SubstitutionError{
 		VarRef:  varRef,
-		Message: fmt.Sprintf("substitution recursion depth exceeded after %d passes", DefaultMaxSubstitutionDepth),
+		Message: fmt.Sprintf("substitution recursion depth exceeded after %d passes", maxDepth),
 	}
 }
 
@@ -815,6 +833,14 @@ func navigateNested(value interface{}, parts []string) (interface{}, error) {
 			if !found {
 				return nil, fmt.Errorf("field '%s' not found", part)
 			}
+
+		case map[string]string:
+			// Parallel collect-mode output_var groups store outputs as map[string]string keyed by step id.
+			val, ok := v[part]
+			if !ok {
+				return nil, fmt.Errorf("field '%s' not found", part)
+			}
+			current = val
 
 		case []interface{}:
 			// Array access with numeric index

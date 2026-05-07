@@ -166,3 +166,76 @@ func TestSubstituteVarsStillRecurse(t *testing.T) {
 		t.Fatalf("Substitute() = %q, want recursive vars to still resolve", got)
 	}
 }
+
+// bd-yowuf: SetMaxDepth must override the package default so a workflow
+// that configures `max_substitution_recursion: 32` actually gets 32 passes
+// instead of being capped at DefaultMaxSubstitutionDepth (8).
+func TestSubstituteHonorsConfiguredMaxDepth(t *testing.T) {
+	// 12 levels deep — exceeds the default of 8 but under a 32 limit.
+	vars := map[string]interface{}{
+		"l00": "leaf",
+	}
+	for i := 1; i <= 11; i++ {
+		vars[chainKey(i)] = "${vars." + chainKey(i-1) + "}"
+	}
+	state := &ExecutionState{Variables: vars}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetMaxDepth(32)
+
+	got, err := sub.Substitute("${vars.l11}")
+	if err != nil {
+		t.Fatalf("Substitute() error = %v with MaxDepth=32", err)
+	}
+	if got != "leaf" {
+		t.Fatalf("Substitute() = %q, want %q", got, "leaf")
+	}
+}
+
+// bd-yowuf: a non-positive limit must fall back to DefaultMaxSubstitutionDepth
+// (the user-configurable knob is opt-in; zero means "use the default").
+func TestSubstituteFallsBackToDefaultWhenMaxDepthUnset(t *testing.T) {
+	vars := map[string]interface{}{
+		"l00": "leaf",
+	}
+	for i := 1; i <= 11; i++ {
+		vars[chainKey(i)] = "${vars." + chainKey(i-1) + "}"
+	}
+	state := &ExecutionState{Variables: vars}
+	sub := NewSubstitutor(state, "sess", "wf")
+
+	_, err := sub.Substitute("${vars.l11}")
+	if err == nil {
+		t.Fatalf("Substitute() error = nil, want recursion depth exceeded")
+	}
+	want := "substitution recursion depth exceeded after 8 passes"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Substitute() error = %v, want substring %q", err, want)
+	}
+}
+
+// bd-yowuf: the depth-exceeded error message should reference the effective
+// limit, not the hardcoded constant. A workflow that lowered the limit to 4
+// must see "after 4 passes" so debug output matches the configured knob.
+func TestSubstituteErrorMessageReflectsConfiguredLimit(t *testing.T) {
+	state := &ExecutionState{
+		Variables: map[string]interface{}{"x": "${vars.x}"},
+	}
+	sub := NewSubstitutor(state, "sess", "wf")
+	sub.SetMaxDepth(4)
+
+	_, err := sub.Substitute("${vars.x}")
+	if err == nil {
+		t.Fatalf("Substitute() error = nil, want recursion error")
+	}
+	want := "substitution recursion depth exceeded after 4 passes"
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("Substitute() error = %v, want substring %q", err, want)
+	}
+}
+
+func chainKey(i int) string {
+	if i < 10 {
+		return "l0" + string(rune('0'+i))
+	}
+	return "l1" + string(rune('0'+i-10))
+}
