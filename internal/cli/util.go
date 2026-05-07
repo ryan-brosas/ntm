@@ -763,3 +763,19 @@ func resolveCreationProjectDirForSession(session string) (string, error) {
 	}
 	return projectDir, nil
 }
+
+// errJSONFailure is returned by JSON-mode commands after they have already
+// written a `success:false` envelope to stdout. The root Execute() handler
+// recognizes it, suppresses the usual stderr "Error: ..." line (the JSON
+// envelope is the canonical machine-readable error surface), and exits
+// non-zero so shell callers can gate on `$?`.
+//
+// Use this only AFTER a JSON encode of a failure result has succeeded.
+// Non-JSON paths should keep returning ordinary fmt.Errorf errors.
+var errJSONFailure = errors.New("ntm: command failed (JSON envelope written)")
+
+// jsonFailureExit returns errJSONFailure unconditionally. Encoding errors
+// from json.Encoder are surfaced as ordinary errors so they reach stderr;
+// any other failure path that wrote a `success:false` envelope must signal
+// non-zero exit through this helper.
+func jsonFailureExit() error { return errJSONFailure }

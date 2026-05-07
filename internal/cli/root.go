@@ -2392,6 +2392,12 @@ func Execute() error {
 	logCommandAuditEnd(err)
 	_ = audit.CloseAll()
 	if err != nil {
+		// errJSONFailure means the command already wrote its failure envelope
+		// to stdout; the only remaining job is to exit non-zero. Don't decorate
+		// stderr — the JSON is the contract.
+		if errors.Is(err, errJSONFailure) {
+			return err
+		}
 		// If not in JSON mode, print the error to stderr
 		// (SilenceErrors is set to true to handle JSON mode properly)
 		if !jsonOutput {

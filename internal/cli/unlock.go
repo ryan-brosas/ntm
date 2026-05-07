@@ -66,7 +66,10 @@ func runUnlock(session string, patterns []string, all bool) error {
 			result := UnlockResult{Success: false, Session: session, Error: "Session has no Agent Mail identity"}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			if encErr := enc.Encode(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
 		}
 		return fmt.Errorf("session '%s' has no Agent Mail identity", session)
 	}
@@ -77,7 +80,10 @@ func runUnlock(session string, patterns []string, all bool) error {
 			result := UnlockResult{Success: false, Session: session, Agent: sessionAgent.AgentName, Error: "Agent Mail server unavailable"}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			if encErr := enc.Encode(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
 		}
 		return fmt.Errorf("agent mail server unavailable")
 	}
@@ -118,7 +124,13 @@ func runUnlock(session string, patterns []string, all bool) error {
 	if IsJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(result)
+		if encErr := enc.Encode(result); encErr != nil {
+			return encErr
+		}
+		if !result.Success {
+			return jsonFailureExit()
+		}
+		return nil
 	}
 
 	if result.Success {

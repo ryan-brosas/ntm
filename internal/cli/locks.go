@@ -94,7 +94,10 @@ func runLocks(session string, allAgents bool) error {
 			result := LocksResult{Success: false, Session: session, ProjectKey: projectKey, Error: "Session has no Agent Mail identity"}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			if encErr := enc.Encode(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
 		}
 		return fmt.Errorf("session '%s' has no Agent Mail identity", session)
 	}
@@ -110,7 +113,10 @@ func runLocks(session string, allAgents bool) error {
 			result := LocksResult{Success: false, Session: session, Agent: agentName, ProjectKey: projectKey, Error: "Agent Mail server unavailable"}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			if encErr := enc.Encode(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
 		}
 		return fmt.Errorf("agent mail server unavailable")
 	}
@@ -138,7 +144,13 @@ func runLocks(session string, allAgents bool) error {
 	if IsJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(result)
+		if encErr := enc.Encode(result); encErr != nil {
+			return encErr
+		}
+		if !result.Success {
+			return jsonFailureExit()
+		}
+		return nil
 	}
 
 	return printLocksResult(result, allAgents)
@@ -298,7 +310,10 @@ func runForceRelease(session string, reservationID int, note string, notify, ski
 			result := ForceReleaseResult{Success: false, Session: session, ReservationID: reservationID, Error: "Session has no Agent Mail identity"}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			if encErr := enc.Encode(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
 		}
 		return fmt.Errorf("session '%s' has no Agent Mail identity", session)
 	}
@@ -309,7 +324,10 @@ func runForceRelease(session string, reservationID int, note string, notify, ski
 			result := ForceReleaseResult{Success: false, Session: session, Agent: agentName, ReservationID: reservationID, Error: "Agent Mail server unavailable"}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			if encErr := enc.Encode(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
 		}
 		return fmt.Errorf("agent mail server unavailable")
 	}
@@ -371,7 +389,13 @@ func runForceRelease(session string, reservationID int, note string, notify, ski
 	if IsJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(result)
+		if encErr := enc.Encode(result); encErr != nil {
+			return encErr
+		}
+		if !result.Success {
+			return jsonFailureExit()
+		}
+		return nil
 	}
 
 	if result.Success {
@@ -453,7 +477,10 @@ func runRenewLocks(session string, extendMinutes int) error {
 			result := RenewResult{Success: false, Session: session, Error: "Session has no Agent Mail identity"}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			if encErr := enc.Encode(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
 		}
 		return fmt.Errorf("session '%s' has no Agent Mail identity", session)
 	}
@@ -464,7 +491,10 @@ func runRenewLocks(session string, extendMinutes int) error {
 			result := RenewResult{Success: false, Session: session, Agent: agentName, Error: "Agent Mail server unavailable"}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			return enc.Encode(result)
+			if encErr := enc.Encode(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
 		}
 		return fmt.Errorf("agent mail server unavailable")
 	}
@@ -504,7 +534,13 @@ func runRenewLocks(session string, extendMinutes int) error {
 	if IsJSONOutput() {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		return enc.Encode(result)
+		if encErr := enc.Encode(result); encErr != nil {
+			return encErr
+		}
+		if !result.Success {
+			return jsonFailureExit()
+		}
+		return nil
 	}
 
 	if result.Success {
