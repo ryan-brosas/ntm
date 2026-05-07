@@ -952,6 +952,17 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 
 	expandedCmd := e.substituteVariables(step.Command)
 
+	argEnv, err := argsToEnv(step.Args)
+	if err != nil {
+		result.Status = StatusFailed
+		result.Error = stepRuntimeError(step, "command", "validation",
+			err.Error(),
+			"use POSIX-compatible arg keys when passing command args as environment variables",
+			err.Error())
+		result.FinishedAt = time.Now()
+		return result
+	}
+
 	if e.config.DryRun {
 		result.Status = StatusCompleted
 		result.Output = dryRunOutput(step, "Would execute command: "+truncatePrompt(expandedCmd, 200))
@@ -980,16 +991,6 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 		cmd.Dir = e.config.ProjectDir
 	}
 
-	argEnv, err := argsToEnv(step.Args)
-	if err != nil {
-		result.Status = StatusFailed
-		result.Error = stepRuntimeError(step, "command", "validation",
-			err.Error(),
-			"use POSIX-compatible arg keys when passing command args as environment variables",
-			err.Error())
-		result.FinishedAt = time.Now()
-		return result
-	}
 	env := append(os.Environ(), argEnv...)
 	cmd.Env = env
 

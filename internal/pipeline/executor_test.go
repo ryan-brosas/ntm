@@ -3206,6 +3206,37 @@ func TestExecuteCommand_DryRun(t *testing.T) {
 	}
 }
 
+// bd-l9o12: dry-run must validate command Args env names so authors get
+// fail-fast feedback. Previously the dry-run early-return shadowed the
+// argsToEnv check and the workflow only failed on a real run.
+func TestExecuteCommand_DryRunRejectsInvalidArgEnvName(t *testing.T) {
+	cfg := DefaultExecutorConfig("test-cmd")
+	cfg.DryRun = true
+	e := NewExecutor(cfg)
+	e.state = &ExecutionState{
+		RunID:      "run-dry-validate",
+		WorkflowID: "test-workflow",
+		Variables:  map[string]interface{}{},
+		Steps:      map[string]StepResult{},
+	}
+	step := &Step{
+		ID:      "dry-bad-env",
+		Command: "true",
+		Args:    map[string]interface{}{"foo-bar": "bad"},
+	}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q (dry-run should still fail validation)", result.Status, StatusFailed)
+	}
+	if result.Error == nil || result.Error.Type != "validation" {
+		t.Fatalf("Error = %+v, want validation error", result.Error)
+	}
+	if !strings.Contains(result.Error.Message, "invalid env var name") {
+		t.Fatalf("Error.Message = %q, want invalid env var name", result.Error.Message)
+	}
+}
+
 func TestExecuteCommand_WaitNone(t *testing.T) {
 	e := newCommandTestExecutor(t)
 	step := &Step{
