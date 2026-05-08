@@ -3,6 +3,7 @@ package pipeline
 import (
 	"bytes"
 	"io"
+	"sync"
 )
 
 // cappedWriter is a bounded io.Writer backed by an in-memory buffer. Writes
@@ -13,12 +14,13 @@ import (
 // commands cannot consume unbounded memory before cmd.Wait() returns
 // (bd-g7cu9).
 //
-// cappedWriter is NOT safe for concurrent Write calls. exec.Cmd serialises
-// writes per stream, so this is fine for the executor's single goroutine
-// per stdout/stderr usage. Mixing two streams into one cappedWriter is also
-// safe because exec.Cmd internally serialises calls when stdout and stderr
-// share the same writer.
+// cappedWriter is safe for concurrent reads (Len/Total/Truncated/String/Bytes)
+// alongside writes. exec.Cmd already serialises writes per stream and across
+// shared writers when stdout and stderr point at the same target, so the
+// internal mutex only contends with the heartbeat goroutine sampling Len()
+// while the writer goroutine is mid-Write (bd-1vhq5).
 type cappedWriter struct {
+	mu        sync.Mutex
 	buf       bytes.Buffer
 	cap       int64
 	truncated bool
@@ -32,6 +34,8 @@ func newCappedWriter(cap int64) *cappedWriter {
 }
 
 func (w *cappedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
 	w.total += int64(len(p))
 	if w.cap <= 0 {
 		w.buf.Write(p)
@@ -51,22 +55,47 @@ func (w *cappedWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// Bytes returns the captured (possibly truncated) payload.
-func (w *cappedWriter) Bytes() []byte { return w.buf.Bytes() }
+// Bytes returns a copy of the captured (possibly truncated) payload. The
+// copy decouples callers from the underlying buffer so concurrent writers
+// cannot mutate the slice after it is returned.
+func (w *cappedWriter) Bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	src := w.buf.Bytes()
+	out := make([]byte, len(src))
+	copy(out, src)
+	return out
+}
 
 // String is the convenience accessor used by callers that immediately
 // stringify the captured output.
-func (w *cappedWriter) String() string { return w.buf.String() }
+func (w *cappedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
 
 // Len returns the size of the captured payload (post-truncation).
-func (w *cappedWriter) Len() int { return w.buf.Len() }
+func (w *cappedWriter) Len() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Len()
+}
 
 // Total returns the total number of bytes observed by Write across all
 // calls, including bytes that were dropped after the cap.
-func (w *cappedWriter) Total() int64 { return w.total }
+func (w *cappedWriter) Total() int64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.total
+}
 
 // Truncated reports whether at least one byte was dropped due to the cap.
-func (w *cappedWriter) Truncated() bool { return w.truncated }
+func (w *cappedWriter) Truncated() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.truncated
+}
 
 // ensureCappedWriterIsWriter is a compile-time assertion.
 var _ io.Writer = (*cappedWriter)(nil)

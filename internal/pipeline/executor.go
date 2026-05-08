@@ -1294,10 +1294,13 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 	// bd-zfdjd.7: emit periodic heartbeat events while the command runs so
 	// operators can distinguish "still working" from "stuck" without
 	// tailing stdout. The first tick fires at commandHeartbeatInterval, so
-	// short commands never emit one. Stops cleanly when waitCommand
-	// returns.
+	// short commands never emit one. The interval is sampled inside the
+	// goroutine but we only wait on it after closing heartbeatDone, which
+	// gives the goroutine a happens-before edge to read the value (bd-48ckr).
 	heartbeatDone := make(chan struct{})
+	heartbeatExited := make(chan struct{})
 	go func() {
+		defer close(heartbeatExited)
 		interval := commandHeartbeatInterval
 		if interval <= 0 {
 			return
@@ -1323,6 +1326,11 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 
 	cleanup := waitCommandWithProcessGroupCleanup(cmdCtx, cmd)
 	close(heartbeatDone)
+	// bd-48ckr: wait for the heartbeat goroutine to fully exit before
+	// returning so test-injected mutations (commandHeartbeatInterval,
+	// slog.Default) and production cleanup never race the goroutine's
+	// final select-loop iteration.
+	<-heartbeatExited
 	waitErr := cleanup.Err
 
 	output := strings.TrimSpace(stdoutBuf.String())

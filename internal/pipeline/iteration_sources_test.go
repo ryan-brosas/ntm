@@ -28,7 +28,7 @@ func TestResolveBeads_StructuredFormResolvesIDs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ResolveBeads: %v", err)
 	}
-	wantArgs := []string{"list", "--json", "--label", "hypothesis", "--status", "active"}
+	wantArgs := []string{"list", "--json", "--limit", "0", "--label", "hypothesis", "--status", "active"}
 	if !reflect.DeepEqual(capturedArgs, wantArgs) {
 		t.Fatalf("br args = %v, want %v", capturedArgs, wantArgs)
 	}
