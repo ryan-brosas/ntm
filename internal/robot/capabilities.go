@@ -1750,6 +1750,28 @@ func buildCommandRegistry() []RobotCommandInfo {
 			},
 		},
 		{
+			Name:        "causality",
+			Flag:        "--robot-causality",
+			Category:    "utility",
+			Description: "Get unified causality timeline across audit, Agent Mail, and pipeline/session state.",
+			Parameters: []RobotParameter{
+				{Name: "session", Flag: "--robot-causality", Type: "string", Required: true, Description: "Session name"},
+				{Name: "causality-project", Flag: "--causality-project", Type: "string", Required: false, Description: "Project path override for Agent Mail and pipeline state lookup"},
+				{Name: "causality-agent", Flag: "--causality-agent", Type: "string", Required: false, Description: "Agent Mail identity for inbox reads"},
+				{Name: "causality-bead", Flag: "--causality-bead", Type: "string", Required: false, Description: "Filter by bead/thread id"},
+				{Name: "causality-pane", Flag: "--causality-pane", Type: "string", Required: false, Description: "Filter by pane id/index"},
+				{Name: "causality-type", Flag: "--causality-type", Type: "string", Required: false, Description: "Filter by normalized event type"},
+				{Name: "causality-chain", Flag: "--causality-chain", Type: "string", Required: false, Description: "Filter by correlation/chain id"},
+				{Name: "causality-since", Flag: "--causality-since", Type: "string", Required: false, Description: "Lower time bound (duration or RFC3339)"},
+				{Name: "causality-until", Flag: "--causality-until", Type: "string", Required: false, Description: "Upper time bound (duration or RFC3339)"},
+				{Name: "causality-limit", Flag: "--causality-limit", Type: "int", Required: false, Default: "200", Description: "Max events to return"},
+			},
+			Examples: []string{
+				"ntm --robot-causality=myproject --causality-bead=bd-2mb03.4",
+				"ntm --robot-causality=myproject --causality-since=1h --causality-type=reservation_active",
+			},
+		},
+		{
 			Name:        "replay",
 			Flag:        "--robot-replay",
 			Category:    "utility",

@@ -897,6 +897,41 @@ Shell Integration:
 			}
 			return
 		}
+		if robotCausality != "" {
+			session, err := resolveRobotOfflineCapableSession(robotCausality)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			projectDir := strings.TrimSpace(robotCausalityProject)
+			if projectDir == "" {
+				if resolvedProject, resolveErr := resolveExplicitProjectDirForSession(session); resolveErr == nil {
+					projectDir = strings.TrimSpace(resolvedProject)
+				}
+			}
+			if projectDir == "" {
+				if cwd, cwdErr := os.Getwd(); cwdErr == nil {
+					projectDir = cwd
+				}
+			}
+			opts := robot.CausalityOptions{
+				Session:   session,
+				Project:   projectDir,
+				AgentName: strings.TrimSpace(robotCausalityAgent),
+				BeadID:    strings.TrimSpace(robotCausalityBead),
+				Pane:      strings.TrimSpace(robotCausalityPane),
+				Type:      strings.TrimSpace(robotCausalityType),
+				Chain:     strings.TrimSpace(robotCausalityChain),
+				Since:     strings.TrimSpace(robotCausalitySince),
+				Until:     strings.TrimSpace(robotCausalityUntil),
+				Limit:     robotCausalityLimit,
+			}
+			if err := robot.PrintCausality(opts); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+			return
+		}
 		if robotActivity != "" {
 			session, err := resolveRobotLiveSession(robotActivity)
 			if err != nil {
@@ -2885,6 +2920,18 @@ var (
 	robotHistorySince string // time-based filter
 	robotHistoryStats bool   // show statistics instead of entries
 
+	// Robot-causality flags for unified causality timeline queries
+	robotCausality        string // session name for causality query
+	robotCausalityProject string // project path for agent mail + pipeline state reads
+	robotCausalityAgent   string // Agent Mail agent name for inbox fetch
+	robotCausalityBead    string // bead/thread filter
+	robotCausalityPane    string // pane filter
+	robotCausalityType    string // normalized event type filter
+	robotCausalityChain   string // causal chain/correlation filter
+	robotCausalitySince   string // lower time bound
+	robotCausalityUntil   string // upper time bound
+	robotCausalityLimit   int    // max output events
+
 	// Robot-activity flags for agent activity detection
 	robotActivity     string // session name for activity query
 	robotActivityType string // filter by agent type (claude, codex, gemini)
@@ -3463,6 +3510,18 @@ func init() {
 	rootCmd.Flags().IntVar(&robotHistoryLast, "history-last", 0, "Show last N entries. Optional with --robot-history. Example: --history-last=10")
 	rootCmd.Flags().StringVar(&robotHistorySince, "history-since", "", "Show entries since time (1h, 30m, 2d, or RFC3339). Optional with --robot-history")
 	rootCmd.Flags().BoolVar(&robotHistoryStats, "history-stats", false, "Show statistics instead of entries. Optional with --robot-history")
+
+	// Robot-causality flags for unified causality timelines across coordination sources
+	rootCmd.Flags().StringVar(&robotCausality, "robot-causality", "", "Get unified causality timeline for a session (JSON). Required: SESSION. Example: ntm --robot-causality=myproject")
+	rootCmd.Flags().StringVar(&robotCausalityProject, "causality-project", "", "Project path override for Agent Mail and pipeline state lookup. Optional with --robot-causality")
+	rootCmd.Flags().StringVar(&robotCausalityAgent, "causality-agent", "", "Agent Mail identity used to fetch inbox messages. Optional with --robot-causality")
+	rootCmd.Flags().StringVar(&robotCausalityBead, "causality-bead", "", "Filter events by bead/thread ID (e.g. bd-2mb03.4). Optional with --robot-causality")
+	rootCmd.Flags().StringVar(&robotCausalityPane, "causality-pane", "", "Filter events by pane index/ID. Optional with --robot-causality")
+	rootCmd.Flags().StringVar(&robotCausalityType, "causality-type", "", "Filter events by normalized type. Optional with --robot-causality")
+	rootCmd.Flags().StringVar(&robotCausalityChain, "causality-chain", "", "Filter events by correlation/chain ID. Optional with --robot-causality")
+	rootCmd.Flags().StringVar(&robotCausalitySince, "causality-since", "", "Lower time bound (duration or RFC3339). Optional with --robot-causality")
+	rootCmd.Flags().StringVar(&robotCausalityUntil, "causality-until", "", "Upper time bound (duration or RFC3339). Optional with --robot-causality")
+	rootCmd.Flags().IntVar(&robotCausalityLimit, "causality-limit", 200, "Max causality events to return (default 200). Optional with --robot-causality")
 
 	// Robot-activity flags for agent activity detection
 	rootCmd.Flags().StringVar(&robotActivity, "robot-activity", "", "Get agent activity state (idle/busy/error). Required: SESSION. Example: ntm --robot-activity=myproject")
