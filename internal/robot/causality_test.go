@@ -101,6 +101,46 @@ func TestBuildCausalityOutput_FiltersByWindowAndFields(t *testing.T) {
 	}
 }
 
+func TestBuildCausalityOutput_SessionFilterKeepsSessionAgnosticMailEvents(t *testing.T) {
+	t0 := time.Date(2026, 5, 8, 12, 30, 0, 0, time.UTC)
+
+	loaders := causalityLoaders{
+		audit: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+			return nil, nil
+		},
+		mail: func(opts CausalityOptions) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+			return []CausalityEvent{
+					{ID: "m1", Source: "agentmail_inbox", Type: "message", Session: "", ts: t0},
+					{ID: "m2", Source: "agentmail_inbox", Type: "message", Session: "other-session", ts: t0.Add(1 * time.Second)},
+				},
+				[]CausalitySourceStatus{{Name: "agentmail_inbox", Available: true, Events: 2}},
+				nil
+		},
+		session:  func(opts CausalityOptions) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions) ([]CausalityEvent, error) { return nil, nil },
+	}
+
+	out := buildCausalityOutput(CausalityOptions{
+		Session: "my-session",
+		Limit:   10,
+	}, loaders)
+	if !out.Success {
+		t.Fatalf("expected success=true, got error=%q", out.Error)
+	}
+	if out.Filtered != 1 {
+		t.Fatalf("expected filtered=1, got %d", out.Filtered)
+	}
+	if len(out.Events) != 1 {
+		t.Fatalf("expected 1 event, got %d", len(out.Events))
+	}
+	if out.Events[0].ID != "m1" {
+		t.Fatalf("expected session-agnostic event m1, got %q", out.Events[0].ID)
+	}
+	if out.Events[0].Session != "" {
+		t.Fatalf("expected empty session on mail event, got %q", out.Events[0].Session)
+	}
+}
+
 func TestBuildCausalityOutput_MissingSourceDegrades(t *testing.T) {
 	t0 := time.Date(2026, 5, 8, 14, 0, 0, 0, time.UTC)
 	loaders := causalityLoaders{
