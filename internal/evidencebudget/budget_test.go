@@ -243,6 +243,80 @@ func TestSurfaces_DegradedMatrixSmoke(t *testing.T) {
 	}
 }
 
+// bd-5zju4: classifyHealth must NOT silently treat unrecognized
+// errors as Healthy or Slow. Pre-fix:
+//   - Result{Err: context.Canceled} → HealthHealthy (the default
+//     arm caught it because none of the recognized sentinels
+//     matched and Stale/Warnings were empty).
+//   - Result{Err: <unknown>, Warnings: ["..."]} → HealthSlow (the
+//     warnings arm fired with no err==nil precondition, preserving
+//     the warning string but losing the underlying error).
+// Post-fix the classifier surfaces these as Unavailable / Degraded
+// so an operator dashboard can't read a non-nil-error result as OK.
+func TestClassifyHealth_UnknownErrorDoesNotMasqueradeAsHealthy(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		r    faultharness.Result
+		want SourceHealth
+	}{
+		{
+			name: "context_canceled_is_unavailable",
+			r:    faultharness.Result{Err: context.Canceled},
+			want: HealthUnavailable,
+		},
+		{
+			name: "unknown_error_alone_is_degraded",
+			r:    faultharness.Result{Err: errSentinel("some unrecognized failure")},
+			want: HealthDegraded,
+		},
+		{
+			name: "unknown_error_with_warnings_is_degraded_not_slow",
+			r: faultharness.Result{
+				Err:      errSentinel("backend hiccup"),
+				Warnings: []string{"slow"},
+			},
+			want: HealthDegraded,
+		},
+		// Existing recognized paths must continue to classify as before.
+		{
+			name: "deadline_exceeded_stays_unavailable",
+			r:    faultharness.Result{Err: context.DeadlineExceeded},
+			want: HealthUnavailable,
+		},
+		{
+			name: "warnings_alone_stays_slow",
+			r:    faultharness.Result{Warnings: []string{"slow_response"}},
+			want: HealthSlow,
+		},
+		{
+			name: "stale_alone_stays_stale",
+			r:    faultharness.Result{Stale: true},
+			want: HealthStale,
+		},
+		{
+			name: "healthy_baseline_unchanged",
+			r:    faultharness.Result{},
+			want: HealthHealthy,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := classifyHealth(c.r); got != c.want {
+				t.Errorf("classifyHealth(%+v) = %s, want %s", c.r, got, c.want)
+			}
+		})
+	}
+}
+
+// errSentinelType is a tiny helper so the test can synthesize
+// unknown errors without pulling in a third sentinel package.
+type errSentinelType string
+
+func (e errSentinelType) Error() string { return string(e) }
+
+func errSentinel(s string) error { return errSentinelType(s) }
+
 // Helper: does any warning mention the given substring (case-insens).
 func warningMentions(warnings []string, needle string) bool {
 	needle = strings.ToLower(needle)

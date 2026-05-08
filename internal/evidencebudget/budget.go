@@ -155,14 +155,27 @@ func Evaluate(ctx context.Context, clock faultharness.Clock, surface Surface) Ev
 }
 
 func classifyHealth(r faultharness.Result) SourceHealth {
+	// Recognized sentinels first; then any other non-nil error
+	// surfaces as Degraded rather than falling through to Healthy or
+	// Slow, so an unknown-shape failure can't masquerade as success
+	// (bd-5zju4). The Stale and Warnings arms are gated to err==nil
+	// implicitly because the err!=nil catch-all above takes them
+	// otherwise.
 	switch {
 	case r.Err == nil && !r.Stale && len(r.Warnings) == 0:
 		return HealthHealthy
-	case r.Err != nil && (errIs(r.Err, faultharness.ErrUnavailable) || errIs(r.Err, context.DeadlineExceeded)):
+	case r.Err != nil && (errIs(r.Err, faultharness.ErrUnavailable) ||
+		errIs(r.Err, context.DeadlineExceeded) ||
+		errIs(r.Err, context.Canceled)):
 		return HealthUnavailable
 	case r.Err != nil && errIs(r.Err, faultharness.ErrPartialSuccess):
 		return HealthPartial
 	case r.Err != nil && errIs(r.Err, faultharness.ErrMalformedJSON):
+		return HealthDegraded
+	case r.Err != nil:
+		// Any other non-nil error: degraded by default. A future
+		// recognized sentinel can carve out a more specific case
+		// above this catch-all.
 		return HealthDegraded
 	case r.Stale:
 		return HealthStale
