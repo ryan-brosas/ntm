@@ -153,6 +153,7 @@ func ComputeDigest(in DigestInput) Digest {
 		out.Status = DigestStatusUnsafe
 	case out.Counts.Warning > 0 || len(cleanedDegradedSources) > 0 ||
 		in.Quiescence.State == QuiescenceBlockedByPeer ||
+		in.Quiescence.State == QuiescenceBlockedBySelf ||
 		in.Quiescence.State == QuiescenceSaturatedReviewLoop ||
 		(sloUnhealthy(in.SLO)):
 		out.HighestSeverity = DigestSeverityWarning

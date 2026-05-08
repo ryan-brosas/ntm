@@ -171,6 +171,28 @@ func TestComputeDigest_QuiescenceUnsafeForcesUnsafeEvenWithoutFindings(t *testin
 	}
 }
 
+// bd-u068s: QuiescenceBlockedBySelf must trigger DigestStatusDegraded
+// (the same as BlockedByPeer) so a digest consumer treating both
+// blocker-states uniformly gets the same severity rollup.
+func TestComputeDigest_QuiescenceBlockedBySelfIsDegraded(t *testing.T) {
+	t.Parallel()
+	in := DigestInput{
+		Now: fixedDigestClock(),
+		Quiescence: QuiescenceAssessment{
+			State:           QuiescenceBlockedBySelf,
+			SafeToStandDown: false,
+			ReasonCodes:     []ReasonCode{ReasonQuiescenceInProgressWork},
+		},
+	}
+	d := ComputeDigest(in)
+	if d.Status != DigestStatusDegraded {
+		t.Errorf("Status = %s, want degraded for BlockedBySelf", d.Status)
+	}
+	if d.HighestSeverity != DigestSeverityWarning {
+		t.Errorf("HighestSeverity = %s, want warning", d.HighestSeverity)
+	}
+}
+
 func TestComputeDigest_WarningFindingsAreDegradedNotUnsafe(t *testing.T) {
 	t.Parallel()
 	in := DigestInput{

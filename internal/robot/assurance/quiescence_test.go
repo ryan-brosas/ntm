@@ -38,6 +38,55 @@ func TestEvaluateQuiescenceBlockedByPeer(t *testing.T) {
 	})
 }
 
+// bd-u068s: LiveOwnedInProgressCount alone — the operator's OWN
+// in-flight work — must produce QuiescenceBlockedBySelf, not
+// QuiescenceBlockedByPeer. Pre-fix this case was silently routed
+// through the peer-attributed state and consumers rendering
+// "blocked by peer X" had no peer to name.
+func TestEvaluateQuiescenceBlockedBySelfWhenOnlyLiveOwnedInProgressNonZero(t *testing.T) {
+	got := EvaluateQuiescence(QuiescenceInput{
+		LiveOwnedInProgressCount: 2,
+	})
+
+	if got.State != QuiescenceBlockedBySelf {
+		t.Fatalf("State = %q, want %q", got.State, QuiescenceBlockedBySelf)
+	}
+	if got.SafeToStandDown {
+		t.Fatalf("SafeToStandDown = true, want false")
+	}
+	assertReasonCodes(t, got.ReasonCodes, []ReasonCode{ReasonQuiescenceInProgressWork})
+	if got.Signal.Status != SignalStatusDegraded {
+		t.Errorf("Signal.Status = %q, want degraded", got.Signal.Status)
+	}
+}
+
+// Peer-attributed signals take precedence when both kinds are present.
+// A swarm with one peer-held in-progress AND one own live-in-progress
+// surfaces as BlockedByPeer (the stronger blocker), preserving the
+// existing test corpus's expectations.
+func TestEvaluateQuiescenceBlockedByPeerWinsWhenPeerAndSelfBothPresent(t *testing.T) {
+	got := EvaluateQuiescence(QuiescenceInput{
+		InProgressCount:          1,
+		LiveOwnedInProgressCount: 1,
+	})
+
+	if got.State != QuiescenceBlockedByPeer {
+		t.Fatalf("State = %q, want %q (peer takes precedence)", got.State, QuiescenceBlockedByPeer)
+	}
+}
+
+// ActiveReservationCount alone still routes to BlockedByPeer because
+// reservations are peer-attributable in the existing data model.
+func TestEvaluateQuiescenceBlockedByPeerWhenOnlyReservationsNonZero(t *testing.T) {
+	got := EvaluateQuiescence(QuiescenceInput{
+		ActiveReservationCount: 3,
+	})
+
+	if got.State != QuiescenceBlockedByPeer {
+		t.Fatalf("State = %q, want %q", got.State, QuiescenceBlockedByPeer)
+	}
+}
+
 func TestEvaluateQuiescenceSaturatedReviewLoop(t *testing.T) {
 	got := EvaluateQuiescence(QuiescenceInput{
 		ReviewRounds:         3,

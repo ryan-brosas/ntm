@@ -7,6 +7,7 @@ type QuiescenceState string
 const (
 	QuiescenceQueueDry            QuiescenceState = "queue_dry"
 	QuiescenceBlockedByPeer       QuiescenceState = "blocked_by_peer"
+	QuiescenceBlockedBySelf       QuiescenceState = "blocked_by_self"
 	QuiescenceSaturatedReviewLoop QuiescenceState = "saturated_review_loop"
 	QuiescenceUnsafeToStandDown   QuiescenceState = "unsafe_to_stand_down"
 )
@@ -54,7 +55,13 @@ func EvaluateQuiescence(input QuiescenceInput) QuiescenceAssessment {
 		)
 	}
 
-	if input.InProgressCount > 0 || input.LiveOwnedInProgressCount > 0 || input.ActiveReservationCount > 0 {
+	// Peer-attributed signals take precedence: if InProgressCount or
+	// ActiveReservationCount is non-zero, the swarm is blocked on
+	// state another agent (or the registry as a whole) is holding.
+	// LiveOwnedInProgressCount alone — the operator's OWN in-flight
+	// work — produces QuiescenceBlockedBySelf so consumers routing on
+	// the State string can render the blocker correctly (bd-u068s).
+	if input.InProgressCount > 0 || input.ActiveReservationCount > 0 {
 		reasons := []ReasonCode{ReasonQuiescenceInProgressWork}
 		if input.ActiveReservationCount > 0 {
 			reasons = append(reasons, ReasonReservationPathConflict)
@@ -66,6 +73,16 @@ func EvaluateQuiescence(input QuiescenceInput) QuiescenceAssessment {
 			reasons,
 			"queue has no ready work, but peer-owned or in-flight work still needs resolution",
 			"inspect in-progress beads and active reservations before creating or assigning new work",
+		)
+	}
+	if input.LiveOwnedInProgressCount > 0 {
+		return newQuiescenceAssessment(
+			QuiescenceBlockedBySelf,
+			false,
+			SignalStatusDegraded,
+			[]ReasonCode{ReasonQuiescenceInProgressWork},
+			"queue has no ready work, but the operator has live in-flight work that still needs resolution",
+			"finish or release your own in-progress work before standing down",
 		)
 	}
 
