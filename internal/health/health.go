@@ -110,6 +110,7 @@ const (
 	// Keep detection windows small so stale historical messages don't dominate
 	// health classification once an agent has recovered and is back at prompt.
 	rateLimitLookbackLines     = 20
+	rateLimitContextLines      = 50
 	errorLookbackLines         = 20
 	criticalErrorLookbackLines = 50
 	processExitLookbackLines   = 12
@@ -223,10 +224,8 @@ func checkAgent(ctx context.Context, pa tmux.PaneActivity) AgentHealth {
 		return agent
 	}
 
-	recentOutput := util.GetLastNLines(output, rateLimitLookbackLines)
-
 	// Check for rate limit and parse wait time (preferred authoritative source)
-	detection := detectRateLimit(recentOutput, string(pa.Pane.Type))
+	detection := detectRateLimit(output, string(pa.Pane.Type))
 	if detection.RateLimited {
 		agent.Issues = append(agent.Issues, Issue{Type: "rate_limit", Message: "Rate limit detected"})
 		agent.RateLimited = true
@@ -257,7 +256,18 @@ func checkAgent(ctx context.Context, pa tmux.PaneActivity) AgentHealth {
 }
 
 func detectRateLimit(output string, agentType string) ratelimit.RateLimitDetection {
-	return ratelimit.DetectRateLimitForAgent(output, agentType)
+	recentOutput := util.GetLastNLines(output, rateLimitLookbackLines)
+	detection := ratelimit.DetectRateLimitForAgent(recentOutput, agentType)
+	if detection.RateLimited || !hasRateLimitChatter(recentOutput) {
+		return detection
+	}
+
+	contextOutput := util.GetLastNLines(output, rateLimitContextLines)
+	contextDetection := ratelimit.DetectRateLimitForAgent(contextOutput, agentType)
+	if contextDetection.RateLimited {
+		return contextDetection
+	}
+	return detection
 }
 
 // detectErrors scans output for error patterns
@@ -278,17 +288,24 @@ func detectErrors(output string) []Issue {
 }
 
 func detectErrorsForAgent(output string, agentType string) []Issue {
+	postPrompt, hasPrompt := outputAfterMostRecentPrompt(output, agentType)
 	scanOutput := output
-	atPrompt := agentType != "" && status.DetectIdleFromOutput(output, agentType)
-	if atPrompt {
-		scanOutput = outputAfterRecentPrompt(output, agentType)
+	if hasPrompt {
+		// Any prompt anywhere in the buffer marks recovery — only scan
+		// what came AFTER it. Crashes prior to that prompt have been
+		// recovered, even if the agent has since produced new output
+		// that pushes the prompt out of the trailing-3-line window.
+		scanOutput = postPrompt
 	}
 
 	issues := detectErrors(scanOutput)
-	if agentType == "" || atPrompt {
+	if agentType == "" || hasPrompt {
 		return issues
 	}
 
+	// No prompt seen anywhere in the buffer → the agent never recovered.
+	// Escalate the crash window so a panic that scrolled past the normal
+	// 20-line lookback (e.g. compilation noise) is still reported.
 	criticalOutput := util.GetLastNLines(output, criticalErrorLookbackLines)
 	for _, et := range status.DetectAllErrorsInOutput(criticalOutput) {
 		if et != status.ErrorCrash || hasIssueType(issues, "crash") {
@@ -303,20 +320,35 @@ func detectErrorsForAgent(output string, agentType string) []Issue {
 	return issues
 }
 
-func outputAfterRecentPrompt(output string, agentType string) string {
+// promptScanLineBudget caps how many tail lines outputAfterMostRecentPrompt
+// will scan when looking for a recovery prompt. A typical tmux capture is a
+// few hundred lines; 1024 covers realistic scrollback without making
+// per-pane health checks expensive on giant buffers.
+const promptScanLineBudget = 1024
+
+// outputAfterMostRecentPrompt returns the slice of output that follows the
+// last prompt line in the buffer, plus a flag indicating whether such a
+// prompt was found. The scan is bounded to the last promptScanLineBudget
+// non-empty lines so a panic-and-recover-and-resume buffer of any practical
+// size still detects the recovery marker. Returns (output, false) when
+// agentType is empty or no prompt is found.
+func outputAfterMostRecentPrompt(output string, agentType string) (string, bool) {
+	if agentType == "" {
+		return output, false
+	}
 	lines := strings.Split(status.StripANSI(output), "\n")
 	linesChecked := 0
-	for i := len(lines) - 1; i >= 0 && linesChecked < 3; i-- {
+	for i := len(lines) - 1; i >= 0 && linesChecked < promptScanLineBudget; i-- {
 		line := strings.TrimSpace(lines[i])
 		if line == "" {
 			continue
 		}
 		linesChecked++
 		if status.IsPromptLine(line, agentType) {
-			return strings.Join(lines[i+1:], "\n")
+			return strings.Join(lines[i+1:], "\n"), true
 		}
 	}
-	return output
+	return output, false
 }
 
 func issueForErrorType(et status.ErrorType) (Issue, bool) {
@@ -339,6 +371,16 @@ func issueForErrorType(et status.ErrorType) (Issue, bool) {
 func hasIssueType(issues []Issue, issueType string) bool {
 	for _, issue := range issues {
 		if issue.Type == issueType {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRateLimitChatter(output string) bool {
+	cleaned := strings.ToLower(status.StripANSI(output))
+	for _, marker := range []string{"retry", "try again", "cooldown", "throttl"} {
+		if strings.Contains(cleaned, marker) {
 			return true
 		}
 	}

@@ -116,6 +116,25 @@ func TestDetectErrorsForAgent_DetectsErrorAfterPrompt(t *testing.T) {
 	}
 }
 
+// bd-9b0et: agent panicked, recovered (prompt visible), then resumed
+// productive work that pushed the prompt out of the trailing-3-line
+// window status.DetectIdleFromOutput uses. The recovered crash must
+// stay suppressed regardless of how far the prompt has scrolled,
+// because a prompt anywhere in the buffer is proof of recovery.
+func TestDetectErrorsForAgent_IgnoresRecoveredCrashWhenPromptScrolledPastTrailingWindow(t *testing.T) {
+	t.Parallel()
+
+	output := "panic: old crash\n" +
+		strings.Repeat("compilation output\n", 30) +
+		"claude>\n" + // recovery marker
+		strings.Repeat("Working on file\n", 10) // pushes prompt past the trailing 3-line window
+
+	issues := detectErrorsForAgent(output, "cc")
+	if hasIssueType(issues, "crash") {
+		t.Fatalf("detectErrorsForAgent re-fired recovered crash after prompt scrolled: %+v", issues)
+	}
+}
+
 func TestDetectRateLimitWithAgentContext(t *testing.T) {
 	t.Parallel()
 
@@ -129,6 +148,48 @@ func TestDetectRateLimitWithAgentContext(t *testing.T) {
 	nonCodex := detectRateLimit(output, "cc")
 	if nonCodex.RateLimited {
 		t.Fatalf("did not expect Claude agent to match Codex-specific rate limit pattern for %q", output)
+	}
+}
+
+func TestDetectRateLimit_IgnoresStaleHistoryBeyondLookback(t *testing.T) {
+	t.Parallel()
+
+	output := "Rate limit exceeded, try again in 60s\n" +
+		strings.Repeat("working normally\n", rateLimitLookbackLines+5)
+
+	detection := detectRateLimit(output, "cc")
+	if detection.RateLimited {
+		t.Fatalf("detectRateLimit detected stale rate limit beyond lookback: %+v", detection)
+	}
+}
+
+func TestDetectRateLimit_DetectsCurrentRateLimitFromFullInput(t *testing.T) {
+	t.Parallel()
+
+	output := strings.Repeat("working normally\n", rateLimitLookbackLines+5) +
+		"Rate limit exceeded, try again in 60s\n"
+
+	detection := detectRateLimit(output, "cc")
+	if !detection.RateLimited {
+		t.Fatalf("detectRateLimit missed current rate limit in tail: %+v", detection)
+	}
+	if detection.WaitSeconds != 60 {
+		t.Fatalf("detectRateLimit WaitSeconds = %d, want 60", detection.WaitSeconds)
+	}
+}
+
+func TestDetectRateLimit_ExtendsContextForRetryChatter(t *testing.T) {
+	t.Parallel()
+
+	output := "Rate limit exceeded, try again in 60s\n" +
+		strings.Repeat("retrying request\n", rateLimitLookbackLines+5)
+
+	detection := detectRateLimit(output, "cc")
+	if !detection.RateLimited {
+		t.Fatalf("detectRateLimit missed rate limit followed by retry chatter: %+v", detection)
+	}
+	if detection.WaitSeconds != 60 {
+		t.Fatalf("detectRateLimit WaitSeconds = %d, want 60", detection.WaitSeconds)
 	}
 }
 
