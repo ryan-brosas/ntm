@@ -249,7 +249,7 @@ func buildCycle(participants []string, meta map[[2]string]*edgeMeta) DeadlockCyc
 	}
 	sort.Strings(c.Resources)
 	sort.Strings(c.Reasons)
-	c.Suggestion = suggestResolution(c)
+	c.Suggestion = suggestResolution(c, meta)
 	return c
 }
 
@@ -262,16 +262,59 @@ type edgeMeta struct {
 }
 
 // suggestResolution chooses a stable suggestion string based on cycle
-// shape. Short cycles call out the longest-waiting holder; longer
-// cycles point to the alphabetically-first participant.
-func suggestResolution(c DeadlockCycle) string {
+// shape (bd-6yomt):
+//   - self-loop (1 participant) → "release self-held reservation: X".
+//   - short cycle (2–3 participants) → names the longest-waiting
+//     holder, i.e., the participant whose incoming edge in the cycle
+//     has the smallest (oldest) .Since timestamp. That is the
+//     upstream blocker whose release breaks the cycle most cleanly.
+//     Falls through to the alphabetically-first participant when no
+//     usable edge metadata exists, preserving canonical determinism.
+//   - longer cycle (4+ participants) → names the alphabetically-first
+//     participant. canonicalCycle has already rotated the cycle so
+//     Participants[0] is that name; the suggestion stays stable
+//     across runs and across structurally identical cycle rotations.
+func suggestResolution(c DeadlockCycle, meta map[[2]string]*edgeMeta) string {
 	if len(c.Participants) == 0 {
 		return ""
 	}
 	if len(c.Participants) == 1 {
 		return "release self-held reservation: " + c.Participants[0]
 	}
+	if len(c.Participants) <= 3 {
+		if longest := pickLongestWaitingHolder(c.Participants, meta); longest != "" {
+			return "ask " + longest + " to release reservations first"
+		}
+	}
 	return "ask " + c.Participants[0] + " to release reservations first"
+}
+
+// pickLongestWaitingHolder walks the (participants[i] → participants[i+1])
+// edges of a canonicalized cycle, looks up each edge's oldest .Since in
+// meta, and returns the holder ("to") of the edge with the smallest
+// oldest timestamp — i.e., the participant that has been blocking the
+// longest. Returns "" when meta is nil or no edge in the cycle has a
+// non-zero oldest timestamp; callers fall back to the alphabetically-
+// first participant in that case.
+func pickLongestWaitingHolder(participants []string, meta map[[2]string]*edgeMeta) string {
+	if len(participants) == 0 || meta == nil {
+		return ""
+	}
+	var bestHolder string
+	var bestOldest time.Time
+	for i := range participants {
+		from := participants[i]
+		to := participants[(i+1)%len(participants)]
+		m, ok := meta[[2]string{from, to}]
+		if !ok || m.oldest.IsZero() {
+			continue
+		}
+		if bestHolder == "" || m.oldest.Before(bestOldest) {
+			bestHolder = to
+			bestOldest = m.oldest
+		}
+	}
+	return bestHolder
 }
 
 func sortedKeys(m map[string]struct{}) []string {

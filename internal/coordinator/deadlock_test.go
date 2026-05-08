@@ -229,6 +229,100 @@ func TestEdgesFromConflicts_SkipsSelfHold(t *testing.T) {
 	}
 }
 
+// bd-6yomt: short-cycle suggestion must name the longest-waiting
+// holder (the "to" of the edge with the smallest .Since), not the
+// alphabetically-first participant. The canonical cycle ordering puts
+// the alphabetically-first participant in Participants[0], so a
+// well-targeted suggestion necessarily diverges from Participants[0]
+// when the cycle's oldest edge is held by a non-first participant.
+func TestDetectDeadlocks_TwoCycleSuggestionPicksLongestWaitingHolder(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 5, 8, 11, 0, 0, 0, time.UTC)
+	// A→B is older (since); B→A is newer (since+1h). Edge A→B's holder
+	// is B — the longest-waiting upstream blocker. Suggestion must name
+	// B even though canonicalization puts A in Participants[0].
+	edges := []WaitEdge{
+		{Waiter: "A", Holder: "B", Resource: "fileA", Since: since},
+		{Waiter: "B", Holder: "A", Resource: "fileB", Since: since.Add(time.Hour)},
+	}
+	r := DetectDeadlocks(edges, DetectDeadlockOptions{Now: deadlockClock()})
+	if len(r.Cycles) != 1 {
+		t.Fatalf("Cycles = %d, want 1", len(r.Cycles))
+	}
+	c := r.Cycles[0]
+	if !equalSlice(c.Participants, []string{"A", "B"}) {
+		t.Fatalf("Participants = %v, want [A B]", c.Participants)
+	}
+	want := "ask B to release reservations first"
+	if c.Suggestion != want {
+		t.Errorf("Suggestion = %q, want %q (longest-waiting holder is B; A is alphabetically first but A→B is the oldest edge)", c.Suggestion, want)
+	}
+
+	// Symmetric case: flip which edge is older. Now A is the longest-
+	// waiting holder and the suggestion should name A — coincidentally
+	// matching the alphabetical fallback, but verifying the algorithm
+	// doesn't always pick the same name regardless of input.
+	edges = []WaitEdge{
+		{Waiter: "A", Holder: "B", Resource: "fileA", Since: since.Add(time.Hour)},
+		{Waiter: "B", Holder: "A", Resource: "fileB", Since: since},
+	}
+	r = DetectDeadlocks(edges, DetectDeadlockOptions{Now: deadlockClock()})
+	if len(r.Cycles) != 1 {
+		t.Fatalf("symmetric Cycles = %d, want 1", len(r.Cycles))
+	}
+	c = r.Cycles[0]
+	want = "ask A to release reservations first"
+	if c.Suggestion != want {
+		t.Errorf("symmetric Suggestion = %q, want %q (longest-waiting holder is A)", c.Suggestion, want)
+	}
+}
+
+// bd-6yomt: when no edge metadata is available (every edge has a zero
+// .Since), suggestResolution must fall back to the alphabetically-
+// first participant so canonical determinism is preserved instead of
+// returning "" and breaking downstream consumers.
+func TestDetectDeadlocks_TwoCycleSuggestionFallsBackToAlphaWithoutMetadata(t *testing.T) {
+	t.Parallel()
+	// No Since on either edge → no usable oldest timestamps.
+	edges := []WaitEdge{
+		{Waiter: "A", Holder: "B"},
+		{Waiter: "B", Holder: "A"},
+	}
+	r := DetectDeadlocks(edges, DetectDeadlockOptions{Now: deadlockClock()})
+	if len(r.Cycles) != 1 {
+		t.Fatalf("Cycles = %d, want 1", len(r.Cycles))
+	}
+	want := "ask A to release reservations first"
+	if got := r.Cycles[0].Suggestion; got != want {
+		t.Errorf("Suggestion = %q, want alphabetical fallback %q", got, want)
+	}
+}
+
+// bd-6yomt: cycles longer than 3 participants intentionally use the
+// alphabetically-first participant for stability, regardless of edge
+// timestamps. Pin this so a future tweak that extends the
+// longest-waiting-holder strategy to long cycles cannot land silently.
+func TestDetectDeadlocks_FourCycleSuggestionIsAlphabetical(t *testing.T) {
+	t.Parallel()
+	since := time.Date(2026, 5, 8, 11, 0, 0, 0, time.UTC)
+	edges := []WaitEdge{
+		{Waiter: "A", Holder: "B", Since: since.Add(2 * time.Hour)},
+		{Waiter: "B", Holder: "C", Since: since.Add(3 * time.Hour)},
+		// C→D is the oldest edge; in a 2- or 3-cycle this would name D,
+		// but in a 4-cycle the alphabetical fallback wins.
+		{Waiter: "C", Holder: "D", Since: since},
+		{Waiter: "D", Holder: "A", Since: since.Add(time.Hour)},
+	}
+	r := DetectDeadlocks(edges, DetectDeadlockOptions{Now: deadlockClock()})
+	if len(r.Cycles) != 1 {
+		t.Fatalf("Cycles = %d, want 1", len(r.Cycles))
+	}
+	want := "ask A to release reservations first"
+	if got := r.Cycles[0].Suggestion; got != want {
+		t.Errorf("Suggestion = %q, want %q (4-cycle uses alphabetical fallback)", got, want)
+	}
+}
+
 func equalSlice(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
