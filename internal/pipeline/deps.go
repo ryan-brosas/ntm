@@ -394,6 +394,60 @@ func (g *DependencyGraph) GetStep(id string) (*Step, bool) {
 	return step, exists
 }
 
+func (g *DependencyGraph) ResolveScopedRuntimeStep(id string) (*Step, string, bool) {
+	parentIDs := make([]string, 0, len(g.steps))
+	for parentID := range g.steps {
+		parentIDs = append(parentIDs, parentID)
+	}
+	sort.Slice(parentIDs, func(i, j int) bool {
+		if len(parentIDs[i]) == len(parentIDs[j]) {
+			return parentIDs[i] < parentIDs[j]
+		}
+		return len(parentIDs[i]) > len(parentIDs[j])
+	})
+
+	for _, parentID := range parentIDs {
+		parent := g.steps[parentID]
+		if child, canonicalID, ok := resolveScopedRuntimeStepFromSteps(parentID, id, parent.Parallel.Steps); ok {
+			return child, canonicalID, true
+		}
+		if child, canonicalID, ok := resolveScopedRuntimeBranchStep(parentID, id, parent.Branches); ok {
+			return child, canonicalID, true
+		}
+	}
+	return nil, "", false
+}
+
+func resolveScopedRuntimeStepFromSteps(parentID, runtimeID string, steps []Step) (*Step, string, bool) {
+	for i := range steps {
+		if scopedChildStepID(parentID, steps[i].ID, i+1) == runtimeID {
+			return &steps[i], steps[i].ID, true
+		}
+	}
+	return nil, "", false
+}
+
+func resolveScopedRuntimeBranchStep(parentID, runtimeID string, branches map[string]interface{}) (*Step, string, bool) {
+	if len(branches) == 0 {
+		return nil, "", false
+	}
+	keys := make([]string, 0, len(branches))
+	for key := range branches {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		steps, err := parseBranchSteps(branches[key], parentID, key)
+		if err != nil {
+			continue
+		}
+		if child, canonicalID, ok := resolveScopedRuntimeStepFromSteps(parentID, runtimeID, steps); ok {
+			return child, canonicalID, true
+		}
+	}
+	return nil, "", false
+}
+
 // GetDependencies returns the dependencies for a step
 func (g *DependencyGraph) GetDependencies(id string) []string {
 	return g.edges[id]

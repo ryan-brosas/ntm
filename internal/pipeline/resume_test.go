@@ -709,6 +709,111 @@ func TestApplyResumeStateLogsOrphanDrops(t *testing.T) {
 	}
 }
 
+func TestResumeParallelScopedChildDoesNotReExecuteCompletedSubstep(t *testing.T) {
+	cfg := DefaultExecutorConfig("parallel-resume-scoped")
+	cfg.DryRun = true
+	executor := NewExecutor(cfg)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "parallel-resume-scoped-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "parallel_group",
+			Parallel: ParallelSpec{Steps: []Step{
+				{ID: "step1", Prompt: "already done"},
+				{ID: "step2", Prompt: "fresh work"},
+			}},
+		}},
+	}
+
+	priorFinishedAt := time.Now().Add(-1 * time.Hour)
+	prior := &ExecutionState{
+		RunID:      "run-parallel-resume-scoped",
+		WorkflowID: workflow.Name,
+		Status:     StatusRunning,
+		StartedAt:  priorFinishedAt.Add(-1 * time.Minute),
+		Steps: map[string]StepResult{
+			"parallel_group_step1": {
+				StepID:     "parallel_group_step1",
+				Status:     StatusCompleted,
+				StartedAt:  priorFinishedAt.Add(-10 * time.Millisecond),
+				FinishedAt: priorFinishedAt,
+				Output:     "PRIOR-SCOPED-STEP1",
+			},
+		},
+		Variables: make(map[string]interface{}),
+	}
+
+	state, err := executor.Resume(context.Background(), workflow, prior, nil)
+	if err != nil {
+		t.Fatalf("Resume() error = %v, want nil", err)
+	}
+	if state.Status != StatusCompleted {
+		t.Fatalf("state.Status = %s, want completed", state.Status)
+	}
+
+	step1, ok := state.Steps["parallel_group_step1"]
+	if !ok {
+		t.Fatalf("state.Steps[parallel_group_step1] missing after resume")
+	}
+	if step1.Output != "PRIOR-SCOPED-STEP1" {
+		t.Fatalf("parallel_group_step1 output = %q, want prior output preserved", step1.Output)
+	}
+	if !step1.FinishedAt.Equal(priorFinishedAt) {
+		t.Fatalf("parallel_group_step1 FinishedAt = %v, want prior timestamp %v", step1.FinishedAt, priorFinishedAt)
+	}
+	if step2, ok := state.Steps["parallel_group_step2"]; !ok || step2.Status != StatusCompleted {
+		t.Fatalf("parallel_group_step2 = %+v, want freshly completed result", step2)
+	}
+}
+
+func TestApplyResumeStateRetainsScopedBranchChildResult(t *testing.T) {
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "branch-resume-scoped-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID:     "router",
+			Branch: "primary",
+			Branches: map[string]interface{}{
+				"primary": map[string]interface{}{
+					"id":         "register_mail",
+					"command":    "echo already-routed",
+					"output_var": "branch_out",
+				},
+			},
+		}},
+	}
+	executor := NewExecutor(DefaultExecutorConfig("branch-resume-scoped"))
+	executor.graph = NewDependencyGraph(workflow)
+	executor.state = &ExecutionState{
+		RunID:      "run-branch-resume-scoped",
+		WorkflowID: workflow.Name,
+		Status:     StatusRunning,
+		Steps: map[string]StepResult{
+			"router_register_mail": {
+				StepID: "router_register_mail",
+				Status: StatusCompleted,
+				Output: "prior branch child",
+			},
+		},
+		Variables: make(map[string]interface{}),
+	}
+
+	executor.applyResumeState()
+
+	if _, ok := executor.state.Steps["router_register_mail"]; !ok {
+		t.Fatalf("scoped branch child result was dropped as an orphan")
+	}
+	if got := executor.state.Variables["steps.router_register_mail.output"]; got != "prior branch child" {
+		t.Fatalf("steps.router_register_mail.output = %v, want prior branch child", got)
+	}
+	if got := executor.state.Variables["branch_out"]; got != "prior branch child" {
+		t.Fatalf("branch_out = %v, want prior branch child", got)
+	}
+}
+
 // TestApplyResumeStateRebuildsRetainedStepOutputs covers bd-bllgq: when
 // applyResumeState marks a completed step as already-executed in the
 // dependency graph, it must also rebuild steps.<id>.output / data plus

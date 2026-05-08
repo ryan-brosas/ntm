@@ -3212,19 +3212,34 @@ func (e *Executor) applyResumeState() {
 			rerunStepIDs = append(rerunStepIDs, stepID)
 			continue
 		}
+		var stepForOutput *Step
 		if err := e.graph.MarkExecuted(stepID); err != nil {
-			delete(e.state.Steps, stepID)
-			orphanStepIDs = append(orphanStepIDs, stepID)
-			orphanDrops = append(orphanDrops, orphanDrop{stepID: stepID, err: err})
-			continue
+			scopedStep, canonicalID, scoped := e.graph.ResolveScopedRuntimeStep(stepID)
+			if !scoped {
+				delete(e.state.Steps, stepID)
+				orphanStepIDs = append(orphanStepIDs, stepID)
+				orphanDrops = append(orphanDrops, orphanDrop{stepID: stepID, err: err})
+				continue
+			}
+			stepForOutput = scopedStep
+			if _, exists := e.graph.GetStep(canonicalID); exists {
+				if markErr := e.graph.MarkExecuted(canonicalID); markErr != nil {
+					delete(e.state.Steps, stepID)
+					orphanStepIDs = append(orphanStepIDs, stepID)
+					orphanDrops = append(orphanDrops, orphanDrop{stepID: stepID, err: markErr})
+					continue
+				}
+			}
+		} else {
+			stepForOutput, _ = e.graph.GetStep(stepID)
 		}
 		entry := retainedStepOutput{
 			stepID:     stepID,
 			output:     result.Output,
 			parsedData: result.ParsedData,
 		}
-		if step, ok := e.graph.GetStep(stepID); ok {
-			entry.outputVar = step.OutputVar
+		if stepForOutput != nil {
+			entry.outputVar = stepForOutput.OutputVar
 		}
 		retained = append(retained, entry)
 	}

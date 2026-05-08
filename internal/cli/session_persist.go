@@ -115,13 +115,11 @@ func (r *SessionsSaveResult) JSON() interface{} {
 }
 
 func runSessionsSave(sessionName string, opts session.SaveOptions) error {
-	if err := tmux.EnsureInstalled(); err != nil {
-		return err
-	}
-
 	// bd-oqwmf: emitSaveFailure writes the success:false envelope and
 	// signals non-zero exit so `ntm sessions save --json` automation
 	// gating on `$?` no longer treats failure as success.
+	// bd-1yws7: hoisted above the tmux.EnsureInstalled() check so the
+	// early-fail path also emits a parseable envelope when --json is set.
 	emitSaveFailure := func(result *SessionsSaveResult) error {
 		if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
 			return encErr
@@ -129,10 +127,25 @@ func runSessionsSave(sessionName string, opts session.SaveOptions) error {
 		return jsonFailureExit()
 	}
 
+	if err := tmux.EnsureInstalled(); err != nil {
+		if jsonOutput {
+			return emitSaveFailure(&SessionsSaveResult{
+				Success: false,
+				Session: sessionName,
+				Error:   err.Error(),
+			})
+		}
+		return err
+	}
+
 	res, err := ResolveSessionWithOptions(sessionName, os.Stdout, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
 	if err != nil {
-		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError(err.Error()))
+		if jsonOutput {
+			return emitSaveFailure(&SessionsSaveResult{
+				Success: false,
+				Session: sessionName,
+				Error:   err.Error(),
+			})
 		}
 		return err
 	}
@@ -236,6 +249,15 @@ func (r *SessionsListResult) JSON() interface{} {
 func runSessionsList() error {
 	sessions, err := session.List()
 	if err != nil {
+		if jsonOutput {
+			// bd-1yws7: route the read failure through a JSON envelope so
+			// `ntm sessions list --json | jq ...` automation sees a
+			// parseable error instead of stderr text + exit 0.
+			return emitJSONFailureEnvelope(map[string]interface{}{
+				"success": false,
+				"error":   err.Error(),
+			})
+		}
 		return err
 	}
 
@@ -315,6 +337,16 @@ func (r *SessionsShowResult) JSON() interface{} {
 func runSessionsShow(name string) error {
 	state, err := session.Load(name)
 	if err != nil {
+		if jsonOutput {
+			// bd-1yws7: same envelope routing as runSessionsList — a
+			// missing/corrupt saved-session file under --json should be
+			// parseable on stdout and signal non-zero exit.
+			return emitJSONFailureEnvelope(map[string]interface{}{
+				"success": false,
+				"session": name,
+				"error":   err.Error(),
+			})
+		}
 		return err
 	}
 
@@ -342,13 +374,30 @@ func newSessionsDeleteCmd() *cobra.Command {
 func runSessionsDelete(name string, force bool) error {
 	t := theme.Current()
 
+	// bd-1yws7: every failure-emitting path under --json goes through
+	// emitJSONFailureEnvelope so automation gates on `$?` no longer treat
+	// missing-saved-state, missing-confirmation, or session.Delete failures
+	// as success. Pre-bd-1yws7 the missing-name/Delete-failure paths
+	// returned raw errors (bypassing --json) and the missing-confirmation
+	// path used output.PrintJSON which always returns nil → exit 0.
+	emitDeleteFailure := func(errMsg string) error {
+		return emitJSONFailureEnvelope(map[string]interface{}{
+			"success": false,
+			"session": name,
+			"error":   errMsg,
+		})
+	}
+
 	if !session.Exists(name) {
+		if jsonOutput {
+			return emitDeleteFailure(fmt.Sprintf("no saved session named '%s'", name))
+		}
 		return fmt.Errorf("no saved session named '%s'", name)
 	}
 
 	if !force {
-		if IsJSONOutput() {
-			return output.PrintJSON(output.NewError("confirmation required (use --force)"))
+		if jsonOutput {
+			return emitDeleteFailure("confirmation required (use --force)")
 		}
 		fmt.Printf("Delete saved session '%s'? [y/N]: ", name)
 		var response string
@@ -360,6 +409,9 @@ func runSessionsDelete(name string, force bool) error {
 	}
 
 	if err := session.Delete(name); err != nil {
+		if jsonOutput {
+			return emitDeleteFailure(err.Error())
+		}
 		return err
 	}
 
@@ -447,17 +499,26 @@ func (r *SessionsRestoreResult) JSON() interface{} {
 }
 
 func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, launchAgents bool) error {
-	if err := tmux.EnsureInstalled(); err != nil {
-		return err
-	}
-
 	// bd-oqwmf: emitRestoreFailure writes the success:false envelope and
 	// signals non-zero exit (parity with bd-usgfy).
+	// bd-1yws7: hoisted above the tmux.EnsureInstalled() check so the
+	// early-fail path also emits a parseable envelope when --json is set.
 	emitRestoreFailure := func(result *SessionsRestoreResult) error {
 		if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
 			return encErr
 		}
 		return jsonFailureExit()
+	}
+
+	if err := tmux.EnsureInstalled(); err != nil {
+		if jsonOutput {
+			return emitRestoreFailure(&SessionsRestoreResult{
+				Success:   false,
+				SavedName: savedName,
+				Error:     err.Error(),
+			})
+		}
+		return err
 	}
 
 	// Load saved state
