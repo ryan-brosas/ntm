@@ -3444,6 +3444,57 @@ func TestExecuteCommand_StdinEmptyPreservesNoStdin(t *testing.T) {
 	}
 }
 
+// TestExecuteCommand_StdinExceedsCap covers bd-1ka2t: when the
+// post-substitution stdin payload exceeds limits.max_command_stdin_bytes,
+// the step must fail with a clear "exceeds limits.max_command_stdin_bytes"
+// error rather than silently shovel the full payload through Go memory.
+func TestExecuteCommand_StdinExceedsCap(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	e.limits = LimitsConfig{MaxCommandStdinBytes: 16}.EffectiveLimits()
+	e.state.Steps["src"] = StepResult{Output: strings.Repeat("x", 32)}
+
+	step := &Step{
+		ID:      "stdin-overflow",
+		Command: "cat",
+		Stdin:   "${steps.src.output}",
+	}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusFailed {
+		t.Fatalf("Status = %q, want %q (stdin payload should exceed cap); error = %+v", result.Status, StatusFailed, result.Error)
+	}
+	if result.Error == nil {
+		t.Fatalf("Error = nil, want a stdin-cap StepError")
+	}
+	if !strings.Contains(result.Error.Message, "max_command_stdin_bytes") {
+		t.Fatalf("Error.Message = %q, want it to mention max_command_stdin_bytes", result.Error.Message)
+	}
+	if result.Error.Type != "limit" {
+		t.Fatalf("Error.Type = %q, want %q", result.Error.Type, "limit")
+	}
+}
+
+// TestExecuteCommand_StdinAtCapSucceeds asserts the cap is inclusive: a
+// payload exactly at limits.max_command_stdin_bytes round-trips normally
+// rather than being rejected as overflow.
+func TestExecuteCommand_StdinAtCapSucceeds(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	e.limits = LimitsConfig{MaxCommandStdinBytes: 8}.EffectiveLimits()
+	step := &Step{
+		ID:      "stdin-at-cap",
+		Command: "cat",
+		Stdin:   "12345678",
+	}
+	result := e.executeCommand(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q (payload at cap should succeed); error = %+v", result.Status, StatusCompleted, result.Error)
+	}
+	if result.Output != "12345678" {
+		t.Fatalf("Output = %q, want %q", result.Output, "12345678")
+	}
+}
+
 func TestExecuteCommand_WaitNone(t *testing.T) {
 	e := newCommandTestExecutor(t)
 	step := &Step{

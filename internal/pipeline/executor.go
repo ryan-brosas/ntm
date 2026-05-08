@@ -1158,6 +1158,21 @@ func (e *Executor) executeCommand(ctx context.Context, step *Step, workflow *Wor
 		return result
 	}
 
+	// bd-1ka2t: enforce a size cap on the post-substitution Stdin payload.
+	// Without this, a step that pipes ${steps.X.output} could materialize up
+	// to MaxCommandStdoutBytes (default 16MB) per iteration, multiplied by
+	// max_concurrent_foreach. Reject above-cap payloads with a clear error
+	// pointing the author at file-based stdin.
+	if stdinCap := e.limits.MaxCommandStdinBytes; stdinCap > 0 && int64(len(expandedStdin)) > stdinCap {
+		result.Status = StatusFailed
+		result.Error = stepRuntimeError(step, "command", "limit",
+			fmt.Sprintf("stdin payload (%d bytes) exceeds limits.max_command_stdin_bytes (%d bytes)", len(expandedStdin), stdinCap),
+			"raise limits.max_command_stdin_bytes or pass the payload via a file path instead of piping it through stdin",
+			"")
+		result.FinishedAt = time.Now()
+		return result
+	}
+
 	// bd-6xlxl: run pipeline substitution over Args string values so
 	// `${vars.x}`, `${env.X}`, `${steps.s.output}`, etc. resolve before they
 	// are exported as environment variables. Without this, args:
