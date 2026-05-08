@@ -2,6 +2,9 @@ package robot
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -225,5 +228,41 @@ func TestBuildCausalityOutput_BeadChainMiniWorkflow(t *testing.T) {
 	joined := strings.Join(gotSources, ",")
 	if joined != "robot_audit,agentmail_reservations,pipeline_state" {
 		t.Fatalf("unexpected source order: %s", joined)
+	}
+}
+
+func TestReadPipelineStateFileWithLimit_RejectsOversizedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.json")
+
+	largeJSON := fmt.Sprintf(`{"run_id":"run-1","workflow_id":"wf","session":"s","status":"running","variables":{"blob":"%s"}}`, strings.Repeat("x", 2048))
+	if err := os.WriteFile(path, []byte(largeJSON), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	_, err := readPipelineStateFileWithLimit(path, 256)
+	if err == nil {
+		t.Fatal("expected size-limit error, got nil")
+	}
+	if !strings.Contains(err.Error(), "exceeds limit") {
+		t.Fatalf("expected exceeds-limit error, got: %v", err)
+	}
+}
+
+func TestReadPipelineStateFileWithLimit_AllowsSmallValidFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "run.json")
+
+	smallJSON := `{"run_id":"run-1","workflow_id":"wf","session":"s","status":"running","started_at":"2026-05-08T00:00:00Z"}`
+	if err := os.WriteFile(path, []byte(smallJSON), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	state, err := readPipelineStateFileWithLimit(path, 4*1024)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state == nil || state.RunID != "run-1" {
+		t.Fatalf("unexpected state: %+v", state)
 	}
 }

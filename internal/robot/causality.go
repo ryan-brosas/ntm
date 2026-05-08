@@ -19,6 +19,8 @@ import (
 
 var causalityBeadPattern = regexp.MustCompile(`\b(?:bd|br)-[A-Za-z0-9][A-Za-z0-9.-]*\b`)
 
+const maxCausalityPipelineStateBytes int64 = 16 * 1024 * 1024
+
 // CausalityOptions configures --robot-causality.
 type CausalityOptions struct {
 	Session   string
@@ -88,9 +90,9 @@ type CausalityOutput struct {
 
 type causalityLoaders struct {
 	audit    func(CausalityOptions, *time.Time, *time.Time) ([]CausalityEvent, error)
-	mail     func(CausalityOptions) ([]CausalityEvent, []CausalitySourceStatus, []string)
-	session  func(CausalityOptions) ([]CausalityEvent, error)
-	pipeline func(CausalityOptions) ([]CausalityEvent, error)
+	mail     func(CausalityOptions, *time.Time, *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string)
+	session  func(CausalityOptions, *time.Time, *time.Time) ([]CausalityEvent, error)
+	pipeline func(CausalityOptions, *time.Time, *time.Time) ([]CausalityEvent, error)
 }
 
 func defaultCausalityLoaders() causalityLoaders {
@@ -193,12 +195,12 @@ func buildCausalityOutput(opts CausalityOptions, loaders causalityLoaders) Causa
 		output.Sources = append(output.Sources, CausalitySourceStatus{Name: "robot_audit", Available: true, Events: len(auditEvents)})
 	}
 
-	mailEvents, mailStatuses, mailWarnings := loaders.mail(opts)
+	mailEvents, mailStatuses, mailWarnings := loaders.mail(opts, since, until)
 	all = append(all, mailEvents...)
 	output.Sources = append(output.Sources, mailStatuses...)
 	output.Warnings = append(output.Warnings, mailWarnings...)
 
-	sessionEvents, err := loaders.session(opts)
+	sessionEvents, err := loaders.session(opts, since, until)
 	if err != nil {
 		output.Sources = append(output.Sources, CausalitySourceStatus{Name: "session_timeline", Available: false, Error: err.Error()})
 		output.Warnings = append(output.Warnings, "session_timeline unavailable: "+err.Error())
@@ -207,7 +209,7 @@ func buildCausalityOutput(opts CausalityOptions, loaders causalityLoaders) Causa
 		output.Sources = append(output.Sources, CausalitySourceStatus{Name: "session_timeline", Available: true, Events: len(sessionEvents)})
 	}
 
-	pipelineEvents, err := loaders.pipeline(opts)
+	pipelineEvents, err := loaders.pipeline(opts, since, until)
 	if err != nil {
 		output.Sources = append(output.Sources, CausalitySourceStatus{Name: "pipeline_state", Available: false, Error: err.Error()})
 		output.Warnings = append(output.Warnings, "pipeline_state unavailable: "+err.Error())
@@ -412,7 +414,7 @@ func loadAuditCausalityEvents(opts CausalityOptions, since, until *time.Time) ([
 	return events, nil
 }
 
-func loadAgentMailCausalityEvents(opts CausalityOptions) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+func loadAgentMailCausalityEvents(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
 	statuses := make([]CausalitySourceStatus, 0, 2)
 	warnings := make([]string, 0, 2)
 	events := make([]CausalityEvent, 0, 128)
@@ -436,15 +438,20 @@ func loadAgentMailCausalityEvents(opts CausalityOptions) ([]CausalityEvent, []Ca
 		statuses = append(statuses, CausalitySourceStatus{Name: "agentmail_reservations", Available: false, Error: err.Error()})
 		warnings = append(warnings, "agentmail_reservations unavailable: "+err.Error())
 	} else {
-		statuses = append(statuses, CausalitySourceStatus{Name: "agentmail_reservations", Available: true, Events: len(reservations)})
+		kept := 0
 		for _, res := range reservations {
+			ts := res.CreatedTS.Time.UTC()
+			if !withinCausalityWindow(ts, since, until) {
+				continue
+			}
+			kept++
 			reason := strings.TrimSpace(res.Reason)
 			bead := findBeadID(reason, res.PathPattern)
 			events = append(events, CausalityEvent{
 				ID:        fmt.Sprintf("am-res:%d", res.ID),
 				Source:    "agentmail_reservations",
 				Type:      "reservation_active",
-				Timestamp: res.CreatedTS.Time.UTC().Format(time.RFC3339Nano),
+				Timestamp: ts.Format(time.RFC3339Nano),
 				Agent:     res.AgentName,
 				BeadID:    bead,
 				Summary:   fmt.Sprintf("%s reserved %s", res.AgentName, res.PathPattern),
@@ -454,9 +461,10 @@ func loadAgentMailCausalityEvents(opts CausalityOptions) ([]CausalityEvent, []Ca
 					"reason":       reason,
 					"expires_at":   res.ExpiresTS.Time.UTC().Format(time.RFC3339Nano),
 				},
-				ts: res.CreatedTS.Time.UTC(),
+				ts: ts,
 			})
 		}
+		statuses = append(statuses, CausalitySourceStatus{Name: "agentmail_reservations", Available: true, Events: kept})
 	}
 
 	agentName := strings.TrimSpace(opts.AgentName)
@@ -466,10 +474,17 @@ func loadAgentMailCausalityEvents(opts CausalityOptions) ([]CausalityEvent, []Ca
 		return events, statuses, warnings
 	}
 
+	inboxLimit := opts.Limit
+	if inboxLimit <= 0 {
+		inboxLimit = 200
+	}
+	if inboxLimit > 2000 {
+		inboxLimit = 2000
+	}
 	inbox, err := client.FetchInbox(ctx, agentmail.FetchInboxOptions{
 		ProjectKey:    project,
 		AgentName:     agentName,
-		Limit:         200,
+		Limit:         inboxLimit,
 		IncludeBodies: false,
 	})
 	if err != nil {
@@ -666,6 +681,20 @@ type causalityPipelineState struct {
 }
 
 func readPipelineStateFile(path string) (*causalityPipelineState, error) {
+	return readPipelineStateFileWithLimit(path, maxCausalityPipelineStateBytes)
+}
+
+func readPipelineStateFileWithLimit(path string, maxBytes int64) (*causalityPipelineState, error) {
+	if maxBytes > 0 {
+		info, err := os.Stat(path)
+		if err != nil {
+			return nil, err
+		}
+		if info.Size() > maxBytes {
+			return nil, fmt.Errorf("pipeline state file exceeds limit: %s (%d > %d)", path, info.Size(), maxBytes)
+		}
+	}
+
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
