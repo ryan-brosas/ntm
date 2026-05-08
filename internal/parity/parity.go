@@ -124,8 +124,8 @@ func Compare(in Inputs) Report {
 		TUICount:    len(in.TUI),
 	}
 
-	robotMap, robotIndexDrifts := indexByKindID("robot", in.Robot)
-	tuiMap, tuiIndexDrifts := indexByKindID("tui", in.TUI)
+	robotMap, robotIndexDrifts := indexByKindID("robot", in.Robot, ignored)
+	tuiMap, tuiIndexDrifts := indexByKindID("tui", in.TUI, ignored)
 	report.Drifts = append(report.Drifts, robotIndexDrifts...)
 	report.Drifts = append(report.Drifts, tuiIndexDrifts...)
 
@@ -147,6 +147,13 @@ func Compare(in Inputs) Report {
 		u, hasU := tuiMap[k]
 		switch {
 		case hasR && !hasU:
+			// bd-w1od9: honor IgnoredFields for the `presence` drift
+			// the same way it is honored for the per-field drifts in
+			// compareViews; the contract docs say IgnoredFields names
+			// match any Drift.Field that Compare emits.
+			if _, skip := ignored["presence"]; skip {
+				continue
+			}
 			report.Drifts = append(report.Drifts, Drift{
 				Kind: r.Kind, ID: r.ID, Field: "presence",
 				Severity: SeverityCritical,
@@ -154,6 +161,9 @@ func Compare(in Inputs) Report {
 				Detail: r.Name + " visible on robot but not TUI",
 			})
 		case hasU && !hasR:
+			if _, skip := ignored["presence"]; skip {
+				continue
+			}
 			report.Drifts = append(report.Drifts, Drift{
 				Kind: u.Kind, ID: u.ID, Field: "presence",
 				Severity: SeverityCritical,
@@ -194,9 +204,19 @@ func Compare(in Inputs) Report {
 	return report
 }
 
-func indexByKindID(surface string, views []SnapshotView) (map[string]SnapshotView, []Drift) {
+func indexByKindID(surface string, views []SnapshotView, ignored map[string]struct{}) (map[string]SnapshotView, []Drift) {
 	out := make(map[string]SnapshotView, len(views))
 	var drifts []Drift
+	emit := func(field string, sev Severity, detail string, normalized SnapshotView) {
+		// bd-w1od9: honor IgnoredFields for the identity-drift fields
+		// (missing_kind, missing_id, duplicate_id) the same way it is
+		// honored in compareViews; the doc contract on IgnoredFields
+		// says names match any Drift.Field that Compare emits.
+		if _, skip := ignored[field]; skip {
+			return
+		}
+		drifts = append(drifts, surfaceDrift(surface, normalized, field, sev, detail))
+	}
 	for _, v := range views {
 		kind := strings.TrimSpace(v.Kind)
 		id := strings.TrimSpace(v.ID)
@@ -204,16 +224,16 @@ func indexByKindID(surface string, views []SnapshotView) (map[string]SnapshotVie
 		normalized.Kind = kind
 		normalized.ID = id
 		if kind == "" {
-			drifts = append(drifts, surfaceDrift(surface, normalized, "missing_kind", SeverityInfo, "view missing Kind on "+surface))
+			emit("missing_kind", SeverityInfo, "view missing Kind on "+surface, normalized)
 			continue
 		}
 		if id == "" {
-			drifts = append(drifts, surfaceDrift(surface, normalized, "missing_id", SeverityInfo, "view missing ID on "+surface))
+			emit("missing_id", SeverityInfo, "view missing ID on "+surface, normalized)
 			continue
 		}
 		k := kind + ":" + id
 		if _, exists := out[k]; exists {
-			drifts = append(drifts, surfaceDrift(surface, normalized, "duplicate_id", SeverityCritical, "two "+surface+" views share the same Kind:ID"))
+			emit("duplicate_id", SeverityCritical, "two "+surface+" views share the same Kind:ID", normalized)
 			continue
 		}
 		out[k] = normalized

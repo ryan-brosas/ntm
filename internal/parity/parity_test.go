@@ -250,6 +250,72 @@ func TestCompare_IgnoredFieldsSuppressDrift(t *testing.T) {
 	}
 }
 
+// bd-w1od9: IgnoredFields was documented to suppress any Drift.Field
+// emitted by Compare, but the presence / duplicate_id / missing_kind /
+// missing_id paths bypassed the ignore filter. Each case below pins
+// the contract.
+func TestCompare_IgnoredFieldsSuppressPresenceDrift(t *testing.T) {
+	t.Parallel()
+	in := twin()
+	in.TUI = in.TUI[:2] // drop %18 from TUI -> would normally produce critical presence drift
+	in.IgnoredFields = []string{"presence"}
+	r := Compare(in)
+	for _, d := range r.Drifts {
+		if d.Field == "presence" {
+			t.Errorf("presence drift fired despite ignore list: %+v", d)
+		}
+	}
+}
+
+func TestCompare_IgnoredFieldsSuppressDuplicateIDDrift(t *testing.T) {
+	t.Parallel()
+	in := twin()
+	in.Robot = append(in.Robot, SnapshotView{
+		Kind: "pane", ID: "%17", Name: "duplicate pane", Status: "stale", AgentType: "gmi", PaneIndex: 99,
+	})
+	in.IgnoredFields = []string{"duplicate_id"}
+	r := Compare(in)
+	for _, d := range r.Drifts {
+		if d.Field == "duplicate_id" {
+			t.Errorf("duplicate_id drift fired despite ignore list: %+v", d)
+		}
+	}
+}
+
+func TestCompare_IgnoredFieldsSuppressMissingKindDrift(t *testing.T) {
+	t.Parallel()
+	in := Inputs{
+		Now: clock(),
+		Robot: []SnapshotView{
+			{ID: "%17", Name: "missing kind"},
+		},
+		IgnoredFields: []string{"missing_kind"},
+	}
+	r := Compare(in)
+	for _, d := range r.Drifts {
+		if d.Field == "missing_kind" {
+			t.Errorf("missing_kind drift fired despite ignore list: %+v", d)
+		}
+	}
+}
+
+func TestCompare_IgnoredFieldsSuppressMissingIDDrift(t *testing.T) {
+	t.Parallel()
+	in := Inputs{
+		Now: clock(),
+		Robot: []SnapshotView{
+			{Kind: "session", Name: "missing id"},
+		},
+		IgnoredFields: []string{"missing_id"},
+	}
+	r := Compare(in)
+	for _, d := range r.Drifts {
+		if d.Field == "missing_id" {
+			t.Errorf("missing_id drift fired despite ignore list: %+v", d)
+		}
+	}
+}
+
 func TestCompare_DriftsSortedCriticalFirstThenStable(t *testing.T) {
 	t.Parallel()
 	in := twin()
