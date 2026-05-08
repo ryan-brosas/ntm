@@ -349,7 +349,11 @@ func (s *Server) SetRedactionConfig(cfg *RedactionConfig) {
 	s.redactionCfg = cfg
 }
 
-// GetRedactionConfig returns a copy of the current redaction configuration.
+// GetRedactionConfig returns a deep copy of the current redaction
+// configuration. The returned struct's reference-typed fields
+// (Allowlist, ExtraPatterns, DisabledCategories) are independent of
+// the server's live config so a caller may mutate the result freely
+// without affecting in-flight requests (bd-oekc2).
 func (s *Server) GetRedactionConfig() *RedactionConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
