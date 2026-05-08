@@ -102,6 +102,44 @@ func TestBuildCloseout_FailedVerificationIsHigh(t *testing.T) {
 	}
 }
 
+// bd-55myk: Counts.ResidualRisks must reflect len(bundle.ResidualRisks).
+// Pre-fix this field was always 0 because computeCloseoutCounts ran
+// before computeResidualRisks and never assigned the field anyway.
+func TestBuildCloseout_CountsResidualRisksMatchesArrayLength(t *testing.T) {
+	t.Parallel()
+	b := BuildCloseout(CloseoutInputs{
+		Now: closeoutClock(),
+		Verifications: []VerificationEntry{
+			{Command: "go test ./internal/foo/...", Outcome: OutcomeFailed},
+		},
+		Reservations: []ReservationSnapshot{
+			{PathPattern: "internal/auth/**", AgentName: "Bob", Exclusive: true, AcquiredAt: closeoutClock().Add(-1 * time.Hour)},
+		},
+		Mail:              MailSnapshot{UnackedUrgent: 1},
+		DegradedProviders: []string{"agentmail"},
+	})
+	if len(b.ResidualRisks) == 0 {
+		t.Fatal("setup error: expected this fixture to produce residual risks")
+	}
+	if b.Counts.ResidualRisks != len(b.ResidualRisks) {
+		t.Fatalf("Counts.ResidualRisks = %d, want %d (len of ResidualRisks array)",
+			b.Counts.ResidualRisks, len(b.ResidualRisks))
+	}
+}
+
+// Empty-input bundle has zero residual risks AND zero count — sanity
+// check that the zero case is also pinned.
+func TestBuildCloseout_EmptyRunHasZeroCountsResidualRisks(t *testing.T) {
+	t.Parallel()
+	b := BuildCloseout(CloseoutInputs{Now: closeoutClock()})
+	if len(b.ResidualRisks) != 0 {
+		t.Fatalf("empty closeout produced risks: %+v", b.ResidualRisks)
+	}
+	if b.Counts.ResidualRisks != 0 {
+		t.Fatalf("Counts.ResidualRisks = %d, want 0", b.Counts.ResidualRisks)
+	}
+}
+
 func TestBuildCloseout_ActiveReservationFiresMediumRisk(t *testing.T) {
 	t.Parallel()
 	b := BuildCloseout(CloseoutInputs{

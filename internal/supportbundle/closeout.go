@@ -175,8 +175,12 @@ func BuildCloseout(in CloseoutInputs) CloseoutBundle {
 		Notes:             append([]string(nil), in.Notes...),
 	}
 
-	bundle.Counts = computeCloseoutCounts(bundle)
+	// Residual risks first so the count below reflects them. Reversing
+	// these two lines silently always reports counts.residual_risks=0
+	// regardless of how many entries computeResidualRisks produced
+	// (bd-55myk).
 	bundle.ResidualRisks = computeResidualRisks(bundle)
+	bundle.Counts = computeCloseoutCounts(bundle)
 
 	// Sort emitted lists deterministically so the bundle is byte-stable.
 	sort.SliceStable(bundle.Commits, func(i, j int) bool {
@@ -210,6 +214,7 @@ func computeCloseoutCounts(b CloseoutBundle) CloseoutCounts {
 		BeadsStillOpen:     len(b.Beads.StillOpen),
 		Verifications:      len(b.Verifications),
 		ActiveReservations: len(b.Reservations),
+		ResidualRisks:      len(b.ResidualRisks),
 	}
 	for _, v := range b.Verifications {
 		switch v.Outcome {
