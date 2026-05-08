@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/bv"
+	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
 )
 
@@ -41,6 +43,7 @@ Examples:
 	cmd.AddCommand(newWorkSearchCmd())
 	cmd.AddCommand(newWorkImpactCmd())
 	cmd.AddCommand(newWorkNextCmd())
+	cmd.AddCommand(newWorkQueueDryCmd())
 	cmd.AddCommand(newWorkHistoryCmd())
 	cmd.AddCommand(newWorkForecastCmd())
 	cmd.AddCommand(newWorkGraphCmd())
@@ -196,6 +199,40 @@ Examples:
 			return runWorkNext()
 		},
 	}
+
+	return cmd
+}
+
+func newWorkQueueDryCmd() *cobra.Command {
+	var (
+		format          string
+		staleHours      int
+		commitLimit     int
+		syncLagMinutes  int
+		maxStaleEntries int
+	)
+
+	cmd := &cobra.Command{
+		Use:   "queue-dry",
+		Short: "Diagnose why no ready work is available and suggest safe next steps",
+		Long: `Diagnose queue-dry situations with evidence from br, bv, sync state, and locks.
+
+This command is advisory-only. It does not claim, reopen, or create beads automatically.
+
+Examples:
+  ntm work queue-dry
+  ntm work queue-dry --format=json
+  ntm work queue-dry --stale-hours=24 --commits=5`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkQueueDry(format, staleHours, commitLimit, syncLagMinutes, maxStaleEntries)
+		},
+	}
+
+	cmd.Flags().StringVar(&format, "format", "", "Output format: text or json")
+	cmd.Flags().IntVar(&staleHours, "stale-hours", 24, "Mark in_progress beads older than this many hours as stale")
+	cmd.Flags().IntVar(&commitLimit, "commits", 5, "Number of recent commits to include in evidence")
+	cmd.Flags().IntVar(&syncLagMinutes, "sync-lag-minutes", 10, "Allowable mtime lag between .beads/beads.db and .beads/issues.jsonl")
+	cmd.Flags().IntVar(&maxStaleEntries, "max-stale", 10, "Maximum stale in_progress beads to include")
 
 	return cmd
 }
@@ -738,6 +775,495 @@ func runWorkNext() error {
 	fmt.Println()
 	fmt.Printf("  %s br update %s --status=in_progress\n",
 		mutedStyle.Render("Claim:"), rec.ID)
+
+	fmt.Println()
+	return nil
+}
+
+// QueueDryResponse captures queue-dry diagnostic data.
+type QueueDryResponse struct {
+	output.TimestampedResponse
+	Success         bool                     `json:"success"`
+	Project         string                   `json:"project"`
+	QueueDry        bool                     `json:"queue_dry"`
+	Evidence        QueueDryEvidence         `json:"evidence"`
+	Recommendations []QueueDryRecommendation `json:"recommendations"`
+	Recipes         []QueueDryRecipe         `json:"recipes"`
+	Warnings        []string                 `json:"warnings,omitempty"`
+	Errors          []string                 `json:"errors,omitempty"`
+}
+
+// QueueDryEvidence stores collected evidence for queue-dry analysis.
+type QueueDryEvidence struct {
+	OpenCount          int                  `json:"open_count"`
+	ActionableCount    int                  `json:"actionable_count"`
+	BlockedCount       int                  `json:"blocked_count"`
+	InProgressCount    int                  `json:"in_progress_count"`
+	ReadyCount         int                  `json:"ready_count"`
+	TriageTopIDs       []string             `json:"triage_top_ids,omitempty"`
+	StaleInProgress    []QueueDryStaleIssue `json:"stale_in_progress,omitempty"`
+	Sync               QueueDrySyncStatus   `json:"sync"`
+	Reservations       QueueDryReservations `json:"reservations"`
+	RecentCommits      []QueueDryCommit     `json:"recent_commits,omitempty"`
+	BeadsSummaryReason string               `json:"beads_summary_reason,omitempty"`
+	TriageError        string               `json:"triage_error,omitempty"`
+}
+
+// QueueDryStaleIssue represents one stale in-progress bead candidate.
+type QueueDryStaleIssue struct {
+	ID        string    `json:"id"`
+	Title     string    `json:"title"`
+	Assignee  string    `json:"assignee,omitempty"`
+	UpdatedAt time.Time `json:"updated_at"`
+	AgeHours  int       `json:"age_hours"`
+}
+
+// QueueDrySyncStatus reports DB/JSONL synchronization state.
+type QueueDrySyncStatus struct {
+	HasLocalBeadsDB      bool       `json:"has_local_beads_db"`
+	IssuesJSONLExists    bool       `json:"issues_jsonl_exists"`
+	BeadsDBExists        bool       `json:"beads_db_exists"`
+	IssuesJSONLUpdatedAt *time.Time `json:"issues_jsonl_updated_at,omitempty"`
+	BeadsDBUpdatedAt     *time.Time `json:"beads_db_updated_at,omitempty"`
+	AgeDeltaSeconds      int64      `json:"age_delta_seconds,omitempty"`
+	Status               string     `json:"status"`
+	NeedsFlush           bool       `json:"needs_flush"`
+}
+
+// QueueDryReservations reports active reservation metadata.
+type QueueDryReservations struct {
+	Available bool     `json:"available"`
+	Count     int      `json:"count"`
+	Holders   []string `json:"holders,omitempty"`
+	Error     string   `json:"error,omitempty"`
+}
+
+// QueueDryCommit stores a compact git commit for operator context.
+type QueueDryCommit struct {
+	Hash    string `json:"hash"`
+	Subject string `json:"subject"`
+}
+
+// QueueDryRecommendation is an advisory-only next step.
+type QueueDryRecommendation struct {
+	Code     string `json:"code"`
+	Summary  string `json:"summary"`
+	Command  string `json:"command,omitempty"`
+	Evidence string `json:"evidence,omitempty"`
+}
+
+// QueueDryRecipe lists a known operator loop recipe.
+type QueueDryRecipe struct {
+	Name    string `json:"name"`
+	Command string `json:"command"`
+	Purpose string `json:"purpose"`
+}
+
+func runWorkQueueDry(format string, staleHours, commitLimit, syncLagMinutes, maxStaleEntries int) error {
+	dir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("getting working directory: %w", err)
+	}
+
+	if staleHours < 1 {
+		staleHours = 1
+	}
+	if commitLimit < 0 {
+		commitLimit = 0
+	}
+	if syncLagMinutes < 1 {
+		syncLagMinutes = 1
+	}
+	if maxStaleEntries < 1 {
+		maxStaleEntries = 1
+	}
+
+	report := collectQueueDryReport(dir, time.Now().UTC(), time.Duration(staleHours)*time.Hour, commitLimit, time.Duration(syncLagMinutes)*time.Minute, maxStaleEntries)
+	outputMode := strings.ToLower(strings.TrimSpace(format))
+	if outputMode == "" && jsonOutput {
+		outputMode = "json"
+	}
+	if outputMode == "json" {
+		return outputJSON(report)
+	}
+	return renderQueueDry(report)
+}
+
+func collectQueueDryReport(dir string, now time.Time, staleThreshold time.Duration, commitLimit int, syncLagThreshold time.Duration, staleLimit int) QueueDryResponse {
+	report := QueueDryResponse{
+		TimestampedResponse: output.NewTimestamped(),
+		Success:             true,
+		Project:             dir,
+	}
+
+	summary := bv.GetBeadsSummary(dir, 5)
+	if summary == nil || !summary.Available {
+		report.Success = false
+		report.Evidence.BeadsSummaryReason = "beads summary unavailable"
+		if summary != nil && strings.TrimSpace(summary.Reason) != "" {
+			report.Evidence.BeadsSummaryReason = summary.Reason
+		}
+		report.Errors = append(report.Errors, report.Evidence.BeadsSummaryReason)
+	} else {
+		report.Evidence.OpenCount = summary.Open
+		report.Evidence.ActionableCount = summary.Ready
+		report.Evidence.BlockedCount = summary.Blocked
+		report.Evidence.InProgressCount = summary.InProgress
+		report.Evidence.ReadyCount = summary.Ready
+		report.Evidence.StaleInProgress = findStaleInProgress(summary.InProgressList, now, staleThreshold, staleLimit)
+	}
+
+	triage, triageErr := bv.GetTriage(dir)
+	if triageErr != nil {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("bv triage unavailable: %v", triageErr))
+		report.Evidence.TriageError = triageErr.Error()
+	} else if triage != nil {
+		report.Evidence.OpenCount = triage.Triage.QuickRef.OpenCount
+		report.Evidence.ActionableCount = triage.Triage.QuickRef.ActionableCount
+		report.Evidence.BlockedCount = triage.Triage.QuickRef.BlockedCount
+		report.Evidence.InProgressCount = triage.Triage.QuickRef.InProgressCount
+		if report.Evidence.ReadyCount == 0 {
+			report.Evidence.ReadyCount = triage.Triage.QuickRef.ActionableCount
+		}
+		for i, rec := range triage.Triage.Recommendations {
+			if i >= 3 {
+				break
+			}
+			report.Evidence.TriageTopIDs = append(report.Evidence.TriageTopIDs, rec.ID)
+		}
+	}
+
+	report.Evidence.Sync = evaluateQueueDrySync(dir, syncLagThreshold)
+	report.Evidence.Reservations = collectQueueDryReservations(dir)
+
+	commits := getRecentGitCommits(commitLimit)
+	for _, c := range commits {
+		hash := c.hash
+		if len(hash) > 8 {
+			hash = hash[:8]
+		}
+		report.Evidence.RecentCommits = append(report.Evidence.RecentCommits, QueueDryCommit{
+			Hash:    hash,
+			Subject: c.subject,
+		})
+	}
+
+	report.QueueDry = report.Evidence.ActionableCount == 0 && report.Evidence.ReadyCount == 0
+	report.Recommendations = buildQueueDryRecommendations(report)
+	report.Recipes = queueDryRecipes()
+
+	return report
+}
+
+func findStaleInProgress(items []bv.BeadInProgress, now time.Time, threshold time.Duration, limit int) []QueueDryStaleIssue {
+	stale := make([]QueueDryStaleIssue, 0)
+	for _, item := range items {
+		if item.UpdatedAt.IsZero() {
+			continue
+		}
+		age := now.Sub(item.UpdatedAt)
+		if age < threshold {
+			continue
+		}
+		stale = append(stale, QueueDryStaleIssue{
+			ID:        item.ID,
+			Title:     item.Title,
+			Assignee:  item.Assignee,
+			UpdatedAt: item.UpdatedAt.UTC(),
+			AgeHours:  int(age.Hours()),
+		})
+	}
+
+	sort.Slice(stale, func(i, j int) bool {
+		return stale[i].UpdatedAt.Before(stale[j].UpdatedAt)
+	})
+	if len(stale) > limit {
+		stale = stale[:limit]
+	}
+	return stale
+}
+
+func evaluateQueueDrySync(projectDir string, lagThreshold time.Duration) QueueDrySyncStatus {
+	status := QueueDrySyncStatus{
+		HasLocalBeadsDB: bv.HasLocalBeadsDB(projectDir),
+		Status:          "unknown",
+	}
+	if !status.HasLocalBeadsDB {
+		status.Status = "no_local_beads_db"
+		return status
+	}
+
+	beadsDir := filepath.Join(projectDir, ".beads")
+	issuesPath := filepath.Join(beadsDir, "issues.jsonl")
+	dbPath := filepath.Join(beadsDir, "beads.db")
+
+	issuesInfo, issuesErr := os.Stat(issuesPath)
+	dbInfo, dbErr := os.Stat(dbPath)
+
+	status.IssuesJSONLExists = issuesErr == nil
+	status.BeadsDBExists = dbErr == nil
+
+	switch {
+	case issuesErr != nil && dbErr != nil:
+		status.Status = "missing_jsonl_and_db"
+		return status
+	case issuesErr != nil:
+		status.Status = "missing_issues_jsonl"
+		return status
+	case dbErr != nil:
+		status.Status = "missing_beads_db"
+		return status
+	}
+
+	issuesUpdatedAt := issuesInfo.ModTime().UTC()
+	dbUpdatedAt := dbInfo.ModTime().UTC()
+	status.IssuesJSONLUpdatedAt = &issuesUpdatedAt
+	status.BeadsDBUpdatedAt = &dbUpdatedAt
+	status.AgeDeltaSeconds = int64(issuesUpdatedAt.Sub(dbUpdatedAt).Seconds())
+
+	switch {
+	case dbUpdatedAt.After(issuesUpdatedAt.Add(lagThreshold)):
+		status.Status = "beads_db_newer_than_jsonl"
+		status.NeedsFlush = true
+	case issuesUpdatedAt.After(dbUpdatedAt.Add(lagThreshold)):
+		status.Status = "issues_jsonl_newer_than_beads_db"
+	default:
+		status.Status = "in_sync"
+	}
+
+	return status
+}
+
+func collectQueueDryReservations(projectDir string) QueueDryReservations {
+	client := newAgentMailClient(projectDir)
+	if !client.IsAvailable() {
+		return QueueDryReservations{
+			Available: false,
+			Error:     "Agent Mail server unavailable",
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	reservations, err := fetchActiveReservations(ctx, client, projectDir, "", true)
+	if err != nil {
+		return QueueDryReservations{
+			Available: false,
+			Error:     err.Error(),
+		}
+	}
+
+	holdersSet := make(map[string]struct{})
+	for _, r := range reservations {
+		if strings.TrimSpace(r.AgentName) == "" {
+			continue
+		}
+		holdersSet[r.AgentName] = struct{}{}
+	}
+
+	holders := make([]string, 0, len(holdersSet))
+	for holder := range holdersSet {
+		holders = append(holders, holder)
+	}
+	sort.Strings(holders)
+
+	return QueueDryReservations{
+		Available: true,
+		Count:     len(reservations),
+		Holders:   holders,
+	}
+}
+
+func buildQueueDryRecommendations(report QueueDryResponse) []QueueDryRecommendation {
+	recs := make([]QueueDryRecommendation, 0, 8)
+
+	if report.Evidence.Sync.NeedsFlush {
+		recs = append(recs, QueueDryRecommendation{
+			Code:     "flush_jsonl",
+			Summary:  "beads DB appears newer than issues.jsonl; flush JSONL export",
+			Command:  "br sync --flush-only",
+			Evidence: report.Evidence.Sync.Status,
+		})
+	}
+
+	if len(report.Evidence.StaleInProgress) > 0 {
+		oldest := report.Evidence.StaleInProgress[0]
+		recs = append(recs, QueueDryRecommendation{
+			Code:     "inspect_stale_in_progress",
+			Summary:  "stale in_progress work exists; resolve ownership before creating new work",
+			Command:  fmt.Sprintf("br show %s --json", oldest.ID),
+			Evidence: fmt.Sprintf("%d stale in_progress items; oldest=%s", len(report.Evidence.StaleInProgress), oldest.ID),
+		})
+	}
+
+	if report.Evidence.Reservations.Available && report.Evidence.Reservations.Count > 0 {
+		recs = append(recs, QueueDryRecommendation{
+			Code:     "inspect_active_reservations",
+			Summary:  "active file reservations may block work pickup",
+			Command:  "ntm locks list <session> --all-agents",
+			Evidence: fmt.Sprintf("%d active reservations", report.Evidence.Reservations.Count),
+		})
+	}
+
+	if report.QueueDry {
+		recs = append(recs,
+			QueueDryRecommendation{
+				Code:     "review_pass",
+				Summary:  "queue is dry; pivot to review-queue prompts for idle agents",
+				Command:  "ntm review-queue <session>",
+				Evidence: fmt.Sprintf("actionable=%d ready=%d", report.Evidence.ActionableCount, report.Evidence.ReadyCount),
+			},
+			QueueDryRecommendation{
+				Code:    "alerts_sweep",
+				Summary: "run critical alert sweep for hidden blockers or stale graph issues",
+				Command: "ntm work alerts --critical-only",
+			},
+			QueueDryRecommendation{
+				Code:    "seed_new_task",
+				Summary: "if still dry after checks, create one scoped operator bead (advisory only)",
+				Command: "br create --title=\"Queue-dry follow-up\" --type=task --priority=2",
+			},
+		)
+	} else if len(report.Evidence.TriageTopIDs) > 0 {
+		recs = append(recs, QueueDryRecommendation{
+			Code:     "claim_top_ready",
+			Summary:  "queue is not dry; claim the top triage recommendation",
+			Command:  fmt.Sprintf("br update %s --status=in_progress", report.Evidence.TriageTopIDs[0]),
+			Evidence: strings.Join(report.Evidence.TriageTopIDs, ", "),
+		})
+	}
+
+	if len(recs) == 0 {
+		recs = append(recs, QueueDryRecommendation{
+			Code:    "refresh_triage",
+			Summary: "refresh br/bv state before taking action",
+			Command: "br ready --json && bv --robot-triage",
+		})
+	}
+
+	return recs
+}
+
+func queueDryRecipes() []QueueDryRecipe {
+	return []QueueDryRecipe{
+		{
+			Name:    "Critical Alerts Sweep",
+			Command: "ntm work alerts --critical-only",
+			Purpose: "Find hidden blockers and stale dependency warnings before creating new work.",
+		},
+		{
+			Name:    "Review Queue Pivot",
+			Command: "ntm review-queue <session>",
+			Purpose: "Keep idle agents productive when no ready beads are available.",
+		},
+		{
+			Name:    "Short Verification Sweep",
+			Command: "rch exec -- go test -short ./internal/<pkg>/...",
+			Purpose: "Run a quick confidence pass on the package you plan to touch next.",
+		},
+		{
+			Name:    "Idea Wizard Backfill",
+			Command: "br create --title=\"Queue-dry follow-up\" --type=task --priority=2",
+			Purpose: "Record one concrete follow-up instead of widening scope without traceability.",
+		},
+	}
+}
+
+func renderQueueDry(report QueueDryResponse) error {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("99"))
+	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	okStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+
+	fmt.Println()
+	fmt.Println(titleStyle.Render("Queue-Dry Diagnostic"))
+	fmt.Println()
+	fmt.Printf("  Project: %s\n", report.Project)
+	if report.QueueDry {
+		fmt.Printf("  Status: %s\n", warnStyle.Render("QUEUE DRY"))
+	} else {
+		fmt.Printf("  Status: %s\n", okStyle.Render("ACTIONABLE WORK EXISTS"))
+	}
+	fmt.Println()
+
+	fmt.Printf("  Open: %d  Ready: %d  Actionable: %d  Blocked: %d  In Progress: %d\n",
+		report.Evidence.OpenCount,
+		report.Evidence.ReadyCount,
+		report.Evidence.ActionableCount,
+		report.Evidence.BlockedCount,
+		report.Evidence.InProgressCount,
+	)
+
+	if len(report.Evidence.TriageTopIDs) > 0 {
+		fmt.Printf("  Top triage IDs: %s\n", strings.Join(report.Evidence.TriageTopIDs, ", "))
+	}
+
+	fmt.Printf("  Sync: %s\n", report.Evidence.Sync.Status)
+	if report.Evidence.Sync.NeedsFlush {
+		fmt.Printf("    %s\n", warnStyle.Render("DB is newer than issues.jsonl; consider br sync --flush-only"))
+	}
+
+	if report.Evidence.Reservations.Available {
+		fmt.Printf("  Active reservations: %d\n", report.Evidence.Reservations.Count)
+	} else {
+		fmt.Printf("  Active reservations: unavailable (%s)\n", report.Evidence.Reservations.Error)
+	}
+
+	if len(report.Evidence.StaleInProgress) > 0 {
+		fmt.Println()
+		fmt.Printf("  Stale in_progress (%d):\n", len(report.Evidence.StaleInProgress))
+		for _, stale := range report.Evidence.StaleInProgress {
+			fmt.Printf("    - %s (%dh): %s\n", stale.ID, stale.AgeHours, stale.Title)
+		}
+	}
+
+	if len(report.Recommendations) > 0 {
+		fmt.Println()
+		fmt.Println(titleStyle.Render("Recommended Next Steps:"))
+		for i, rec := range report.Recommendations {
+			fmt.Printf("  %d. %s\n", i+1, rec.Summary)
+			if rec.Command != "" {
+				fmt.Printf("     %s %s\n", mutedStyle.Render("Command:"), rec.Command)
+			}
+			if rec.Evidence != "" {
+				fmt.Printf("     %s %s\n", mutedStyle.Render("Evidence:"), rec.Evidence)
+			}
+		}
+	}
+
+	if len(report.Warnings) > 0 {
+		fmt.Println()
+		fmt.Println(warnStyle.Render("Warnings:"))
+		for _, warning := range report.Warnings {
+			fmt.Printf("  - %s\n", warning)
+		}
+	}
+	if len(report.Errors) > 0 {
+		fmt.Println()
+		fmt.Println(errStyle.Render("Errors:"))
+		for _, err := range report.Errors {
+			fmt.Printf("  - %s\n", err)
+		}
+	}
+
+	if len(report.Evidence.RecentCommits) > 0 {
+		fmt.Println()
+		fmt.Println(titleStyle.Render("Recent Commits:"))
+		for _, c := range report.Evidence.RecentCommits {
+			fmt.Printf("  - %s %s\n", c.Hash, c.Subject)
+		}
+	}
+
+	if len(report.Recipes) > 0 {
+		fmt.Println()
+		fmt.Println(titleStyle.Render("Known Recipes:"))
+		for _, recipe := range report.Recipes {
+			fmt.Printf("  - %s\n", recipe.Name)
+			fmt.Printf("    %s %s\n", mutedStyle.Render("Command:"), recipe.Command)
+		}
+	}
 
 	fmt.Println()
 	return nil
