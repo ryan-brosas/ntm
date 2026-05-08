@@ -109,7 +109,11 @@ func defaultCausalityLoaders() causalityLoaders {
 
 // PrintCausality emits merged, replayable causality events as JSON.
 func PrintCausality(opts CausalityOptions) error {
-	output := buildCausalityOutput(opts, defaultCausalityLoaders())
+	return printCausality(opts, defaultCausalityLoaders())
+}
+
+func printCausality(opts CausalityOptions, loaders causalityLoaders) error {
+	output := buildCausalityOutput(opts, loaders)
 	return encodeJSON(output)
 }
 

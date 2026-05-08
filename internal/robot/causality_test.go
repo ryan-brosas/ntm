@@ -1,6 +1,7 @@
 package robot
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -76,8 +77,10 @@ func TestBuildCausalityOutput_FiltersByWindowAndFields(t *testing.T) {
 		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
 			return nil, []CausalitySourceStatus{{Name: "agentmail_inbox", Available: true, Events: 0}}, nil
 		},
-		session:  func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) { return nil, nil, nil },
+		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
+			return nil, nil, nil
+		},
 	}
 
 	out := buildCausalityOutput(CausalityOptions{
@@ -119,8 +122,10 @@ func TestBuildCausalityOutput_SessionFilterKeepsSessionAgnosticMailEvents(t *tes
 				[]CausalitySourceStatus{{Name: "agentmail_inbox", Available: true, Events: 2}},
 				nil
 		},
-		session:  func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) { return nil, nil, nil },
+		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
+			return nil, nil, nil
+		},
 	}
 
 	out := buildCausalityOutput(CausalityOptions{
@@ -245,8 +250,10 @@ func TestBuildCausalityOutput_FilterCountsReflectReturnedLimit(t *testing.T) {
 		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
 			return nil, nil, nil
 		},
-		session:  func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
-		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) { return nil, nil, nil },
+		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) { return nil, nil },
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
+			return nil, nil, nil
+		},
 	}
 
 	out := buildCausalityOutput(CausalityOptions{
@@ -270,6 +277,130 @@ func TestBuildCausalityOutput_FilterCountsReflectReturnedLimit(t *testing.T) {
 	}
 	if len(out.Events) != 2 {
 		t.Fatalf("len(events) = %d, want 2", len(out.Events))
+	}
+}
+
+func TestPrintCausality_EmitsQueryableOperatorTimeline(t *testing.T) {
+	originalFormat := GetOutputFormat()
+	originalVerbosity := GetOutputVerbosity()
+	SetOutputFormat(FormatJSON)
+	SetOutputVerbosity(VerbosityDefault)
+	t.Cleanup(func() {
+		SetOutputFormat(originalFormat)
+		SetOutputVerbosity(originalVerbosity)
+	})
+
+	t0 := time.Date(2026, 5, 8, 17, 0, 0, 0, time.UTC)
+	beadID := "bd-fxj4f.5"
+	session := "myproj"
+	runID := "run-42"
+
+	loaders := causalityLoaders{
+		audit: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+			return []CausalityEvent{{
+				ID:      "audit-send",
+				Source:  "robot_audit",
+				Type:    "command",
+				Session: session,
+				Pane:    "2",
+				Agent:   "cod_1",
+				BeadID:  beadID,
+				ChainID: "cmd-17",
+				RunID:   "cmd-17",
+				Summary: "robot send",
+				ts:      t0,
+			}}, nil
+		},
+		mail: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []CausalitySourceStatus, []string) {
+			return []CausalityEvent{{
+					ID:      "mail-start",
+					Source:  "agentmail_inbox",
+					Type:    "message",
+					Agent:   "YellowBluff",
+					BeadID:  beadID,
+					ChainID: beadID,
+					Summary: "[bd-fxj4f.5] Start",
+					ts:      t0.Add(time.Second),
+				}},
+				[]CausalitySourceStatus{{Name: "agentmail_inbox", Available: true, Events: 1}},
+				nil
+		},
+		session: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, error) {
+			return []CausalityEvent{{
+				ID:      "session-working",
+				Source:  "session_timeline",
+				Type:    "working",
+				Session: session,
+				Pane:    "2",
+				Agent:   "cod_1",
+				BeadID:  beadID,
+				ChainID: runID,
+				RunID:   runID,
+				Summary: "cod_1 -> working",
+				ts:      t0.Add(2 * time.Second),
+			}}, nil
+		},
+		pipeline: func(opts CausalityOptions, since, until *time.Time) ([]CausalityEvent, []string, error) {
+			return []CausalityEvent{{
+				ID:      "pipeline-start",
+				Source:  "pipeline_state",
+				Type:    "pipeline_started",
+				Session: session,
+				BeadID:  beadID,
+				ChainID: runID,
+				RunID:   runID,
+				Summary: "pipeline run started",
+				ts:      t0.Add(3 * time.Second),
+			}}, nil, nil
+		},
+	}
+
+	stdout, err := captureStdout(t, func() error {
+		return printCausality(CausalityOptions{
+			Session:   session,
+			Project:   "/tmp/project",
+			AgentName: "YellowBluff",
+			BeadID:    beadID,
+			Limit:     10,
+		}, loaders)
+	})
+	if err != nil {
+		t.Fatalf("printCausality() error = %v", err)
+	}
+
+	var out CausalityOutput
+	if err := json.Unmarshal([]byte(stdout), &out); err != nil {
+		t.Fatalf("unmarshal causality output: %v\noutput=%s", err, stdout)
+	}
+	if !out.Success {
+		t.Fatalf("expected success=true, got error=%q", out.Error)
+	}
+	if out.Query.Session != session || out.Query.BeadID != beadID || out.Query.AgentName != "YellowBluff" {
+		t.Fatalf("query = %+v, want session=%q bead=%q agent=YellowBluff", out.Query, session, beadID)
+	}
+	if len(out.Events) != 4 {
+		t.Fatalf("events = %d, want 4: %+v", len(out.Events), out.Events)
+	}
+
+	bySource := make(map[string]CausalityEvent, len(out.Events))
+	for _, ev := range out.Events {
+		if ev.BeadID != beadID {
+			t.Fatalf("%s bead_id = %q, want %q", ev.Source, ev.BeadID, beadID)
+		}
+		bySource[ev.Source] = ev
+	}
+
+	if got := bySource["robot_audit"].Pane; got != "2" {
+		t.Fatalf("robot_audit pane = %q, want 2", got)
+	}
+	if got := bySource["agentmail_inbox"].ChainID; got != beadID {
+		t.Fatalf("agentmail_inbox chain_id = %q, want thread/bead %q", got, beadID)
+	}
+	if got := bySource["session_timeline"].RunID; got != runID {
+		t.Fatalf("session_timeline run_id = %q, want %q", got, runID)
+	}
+	if got := bySource["pipeline_state"].RunID; got != runID {
+		t.Fatalf("pipeline_state run_id = %q, want %q", got, runID)
 	}
 }
 
@@ -436,10 +567,10 @@ func TestWithinCausalityWindow_BoundsAndZeroPassthrough(t *testing.T) {
 	after := mid.Add(1 * time.Hour)
 
 	cases := []struct {
-		name             string
-		ts               time.Time
-		since, until     *time.Time
-		want             bool
+		name         string
+		ts           time.Time
+		since, until *time.Time
+		want         bool
 	}{
 		{"both nil", mid, nil, nil, true},
 		{"in window", mid, &before, &after, true},
@@ -543,6 +674,76 @@ func TestLoadPipelineCausalityEvents_OversizedFileSurfacesWarning(t *testing.T) 
 	}
 	if !strings.Contains(warnings[0], "huge.json") {
 		t.Errorf("warning = %q, want filename mention", warnings[0])
+	}
+}
+
+func TestLoadPipelineCausalityEvents_CorrelatesBeadSessionAndRun(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	pipelineDir := filepath.Join(dir, ".ntm", "pipelines")
+	if err := os.MkdirAll(pipelineDir, 0o755); err != nil {
+		t.Fatalf("mkdir pipelines: %v", err)
+	}
+
+	startedAt := time.Date(2026, 5, 8, 18, 0, 0, 0, time.UTC)
+	updatedAt := startedAt.Add(time.Minute)
+	finishedAt := startedAt.Add(2 * time.Minute)
+	stateJSON := fmt.Sprintf(`{
+		"run_id": "run-42",
+		"workflow_id": "wf-operator",
+		"session": "myproj",
+		"status": "completed",
+		"started_at": %q,
+		"updated_at": %q,
+		"finished_at": %q,
+		"variables": {"bead_id": "bd-fxj4f.5"}
+	}`, startedAt.Format(time.RFC3339), updatedAt.Format(time.RFC3339), finishedAt.Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(pipelineDir, "run-42.json"), []byte(stateJSON), 0o644); err != nil {
+		t.Fatalf("write pipeline state: %v", err)
+	}
+
+	events, warnings, err := loadPipelineCausalityEvents(CausalityOptions{
+		Project: dir,
+		Session: "myproj",
+	}, nil, nil)
+	if err != nil {
+		t.Fatalf("loadPipelineCausalityEvents() error = %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if len(events) != 3 {
+		t.Fatalf("events = %d, want 3: %+v", len(events), events)
+	}
+
+	wantTypes := map[string]bool{
+		"pipeline_started":  false,
+		"pipeline_updated":  false,
+		"pipeline_finished": false,
+	}
+	for _, ev := range events {
+		if ev.Source != "pipeline_state" {
+			t.Fatalf("source = %q, want pipeline_state", ev.Source)
+		}
+		if ev.Session != "myproj" {
+			t.Fatalf("%s session = %q, want myproj", ev.Type, ev.Session)
+		}
+		if ev.BeadID != "bd-fxj4f.5" {
+			t.Fatalf("%s bead_id = %q, want bd-fxj4f.5", ev.Type, ev.BeadID)
+		}
+		if ev.ChainID != "run-42" || ev.RunID != "run-42" {
+			t.Fatalf("%s chain/run = %q/%q, want run-42/run-42", ev.Type, ev.ChainID, ev.RunID)
+		}
+		if _, ok := wantTypes[ev.Type]; !ok {
+			t.Fatalf("unexpected type %q", ev.Type)
+		}
+		wantTypes[ev.Type] = true
+	}
+	for typ, seen := range wantTypes {
+		if !seen {
+			t.Fatalf("missing pipeline event type %q", typ)
+		}
 	}
 }
 
