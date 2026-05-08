@@ -1056,6 +1056,17 @@ func verifyChecksum(filePath string, expectedHash string) error {
 	return nil
 }
 
+// maxArchiveEntryBytes caps the decompressed size of a single entry in a
+// release archive. Set well above any realistic ntm binary so legitimate
+// upgrades pass while a malicious or corrupted release artifact whose entry
+// expands pathologically fails fast rather than exhausting disk. Mirrors
+// the per-entry caps in internal/bundle/verify.go (100MB) and
+// internal/checkpoint/export.go (maxImportEntrySize) — bd-i7w7q.
+//
+// Declared as var so tests can override with a small ceiling and exercise
+// the bomb-detection path without authoring a 1GB fixture.
+var maxArchiveEntryBytes int64 = 1 << 30 // 1 GB
+
 // extractTarGz extracts a tar.gz file and returns the path to the ntm binary
 func extractTarGz(archivePath, destDir string) (string, error) {
 	f, err := os.Open(archivePath)
@@ -1103,9 +1114,17 @@ func extractTarGz(archivePath, destDir string) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			if _, err := io.Copy(outFile, tr); err != nil {
+			// bd-i7w7q: cap per-entry decompression so a malicious or
+			// corrupted artifact cannot expand pathologically. Read at
+			// most maxArchiveEntryBytes+1 to detect overflow.
+			n, copyErr := io.CopyN(outFile, tr, maxArchiveEntryBytes+1)
+			if copyErr != nil && copyErr != io.EOF {
 				outFile.Close()
-				return "", err
+				return "", copyErr
+			}
+			if n > maxArchiveEntryBytes {
+				outFile.Close()
+				return "", fmt.Errorf("archive entry %q exceeds %d bytes — possible decompression bomb", header.Name, maxArchiveEntryBytes)
 			}
 			outFile.Close()
 		}
@@ -1166,11 +1185,17 @@ func extractZip(archivePath, destDir string) (string, error) {
 			return "", err
 		}
 
-		_, err = io.Copy(outFile, rc)
+		// bd-i7w7q: same per-entry cap as extractTarGz — read at most
+		// maxArchiveEntryBytes+1 so we can detect when a single entry
+		// exceeds the safe limit.
+		n, copyErr := io.CopyN(outFile, rc, maxArchiveEntryBytes+1)
 		rc.Close()
 		outFile.Close()
-		if err != nil {
-			return "", err
+		if copyErr != nil && copyErr != io.EOF {
+			return "", copyErr
+		}
+		if n > maxArchiveEntryBytes {
+			return "", fmt.Errorf("archive entry %q exceeds %d bytes — possible decompression bomb", f.Name, maxArchiveEntryBytes)
 		}
 	}
 
