@@ -1340,7 +1340,8 @@ func runAssignJSON(opts *AssignCommandOptions) error {
 				Message: err.Error(),
 			},
 		}
-		return json.NewEncoder(os.Stdout).Encode(envelope)
+		// bd-oqwmf: signal non-zero exit after writing the success:false envelope.
+		return emitJSONFailureEnvelope(envelope)
 	}
 
 	// Collect warnings from errors field
@@ -2289,7 +2290,7 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 	store, err := assignment.LoadStore(session)
 	if err != nil {
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeRetryEnvelope(
+			return emitJSONFailureEnvelope(makeRetryEnvelope(
 				session, false, nil, "STORE_LOAD_ERROR",
 				fmt.Sprintf("failed to load assignment store: %v", err), nil,
 			))
@@ -2301,7 +2302,7 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 	allAssignments := store.GetAll()
 	if len(allAssignments) == 0 {
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeRetryEnvelope(
+			return emitJSONFailureEnvelope(makeRetryEnvelope(
 				session, false, nil, "NO_ASSIGNMENTS", "no assignments found", nil,
 			))
 		}
@@ -2330,7 +2331,7 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 			for _, a := range allAssignments {
 				if a.BeadID == assignRetry {
 					if IsJSONOutput() {
-						return json.NewEncoder(os.Stdout).Encode(makeRetryEnvelope(
+						return emitJSONFailureEnvelope(makeRetryEnvelope(
 							session, false, nil, "NOT_FAILED",
 							fmt.Sprintf("bead %s is not in failed state (status: %s)", assignRetry, a.Status), nil,
 						))
@@ -2339,7 +2340,7 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 				}
 			}
 			if IsJSONOutput() {
-				return json.NewEncoder(os.Stdout).Encode(makeRetryEnvelope(
+				return emitJSONFailureEnvelope(makeRetryEnvelope(
 					session, false, nil, "NOT_FOUND",
 					fmt.Sprintf("bead %s not found in assignments", assignRetry), nil,
 				))
@@ -2367,7 +2368,7 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 	idleAgents, err := getIdleAgents(session, assignToType, assignVerbose)
 	if err != nil {
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeRetryEnvelope(
+			return emitJSONFailureEnvelope(makeRetryEnvelope(
 				session, false, nil, "AGENT_ERROR",
 				fmt.Sprintf("failed to get idle agents: %v", err), nil,
 			))
@@ -2379,7 +2380,7 @@ func runRetryAssignments(cmd *cobra.Command, session string) error {
 	panes, err := tmux.GetPanes(session)
 	if err != nil {
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeRetryEnvelope(
+			return emitJSONFailureEnvelope(makeRetryEnvelope(
 				session, false, nil, "PANE_ERROR",
 				fmt.Sprintf("failed to get panes: %v", err), nil,
 			))
@@ -2571,7 +2572,7 @@ func runClearAssignments(cmd *cobra.Command, session string) error {
 	if assignClear != "" && assignClearPane >= 0 {
 		err := fmt.Errorf("cannot use both --clear and --clear-pane at the same time")
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeClearErrorEnvelope("INVALID_ARGS", err.Error()))
+			return emitJSONFailureEnvelope(makeClearErrorEnvelope("INVALID_ARGS", err.Error()))
 		}
 		return err
 	}
@@ -2586,7 +2587,7 @@ func runClearAssignments(cmd *cobra.Command, session string) error {
 
 	err := fmt.Errorf("no clear operation specified")
 	if IsJSONOutput() {
-		return json.NewEncoder(os.Stdout).Encode(makeClearErrorEnvelope("INVALID_ARGS", err.Error()))
+		return emitJSONFailureEnvelope(makeClearErrorEnvelope("INVALID_ARGS", err.Error()))
 	}
 	return err
 }
@@ -2615,7 +2616,8 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 					Message: err.Error(),
 				},
 			}
-			return json.NewEncoder(os.Stdout).Encode(envelope)
+			// bd-oqwmf: signal non-zero exit after the success:false envelope.
+			return emitJSONFailureEnvelope(envelope)
 		}
 		return err
 	}
@@ -2690,7 +2692,16 @@ func runClearSpecificBeads(cmd *cobra.Command, session string, clearBeads string
 			},
 			Warnings: []string{},
 		}
-		return json.NewEncoder(os.Stdout).Encode(envelope)
+		// bd-oqwmf: clear-bulk is dynamic — envelope.Success may be false
+		// (zero of N cleared). Encode then route through jsonFailureExit on
+		// the failure branch to keep `$?` honest for partial/total failure.
+		if encErr := json.NewEncoder(os.Stdout).Encode(envelope); encErr != nil {
+			return encErr
+		}
+		if !envelope.Success {
+			return jsonFailureExit()
+		}
+		return nil
 	}
 
 	// Text output
@@ -2736,7 +2747,7 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 	if err != nil {
 		err = fmt.Errorf("failed to get panes: %w", err)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeClearPaneErrorEnvelope("TMUX_ERROR", err.Error()))
+			return emitJSONFailureEnvelope(makeClearPaneErrorEnvelope("TMUX_ERROR", err.Error()))
 		}
 		return err
 	}
@@ -2753,7 +2764,7 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 	if targetPane == nil {
 		err := fmt.Errorf("pane %d not found in session %s", pane, session)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeClearPaneErrorEnvelope("PANE_NOT_FOUND", err.Error()))
+			return emitJSONFailureEnvelope(makeClearPaneErrorEnvelope("PANE_NOT_FOUND", err.Error()))
 		}
 		return err
 	}
@@ -2765,7 +2776,7 @@ func runClearPaneAssignments(cmd *cobra.Command, session string, pane int) error
 	if err != nil {
 		err = fmt.Errorf("failed to load assignment store: %w", err)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeClearPaneErrorEnvelope("STORE_ERROR", err.Error()))
+			return emitJSONFailureEnvelope(makeClearPaneErrorEnvelope("STORE_ERROR", err.Error()))
 		}
 		return err
 	}
@@ -2872,7 +2883,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	if beadID == "" {
 		err := fmt.Errorf("bead ID required for --reassign")
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "INVALID_ARGS", err.Error(), nil))
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "INVALID_ARGS", err.Error(), nil))
 		}
 		return err
 	}
@@ -2881,7 +2892,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	if assignToPane < 0 && assignToType == "" {
 		err := fmt.Errorf("either --to-pane or --to-type must be specified with --reassign")
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "INVALID_ARGS", err.Error(), nil))
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "INVALID_ARGS", err.Error(), nil))
 		}
 		return err
 	}
@@ -2890,7 +2901,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	if assignToPane >= 0 && assignToType != "" {
 		err := fmt.Errorf("cannot specify both --to-pane and --to-type")
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "INVALID_ARGS", err.Error(), nil))
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "INVALID_ARGS", err.Error(), nil))
 		}
 		return err
 	}
@@ -2900,7 +2911,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	if err != nil {
 		err = fmt.Errorf("failed to load assignment store: %w", err)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "STORE_ERROR", err.Error(), nil))
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "STORE_ERROR", err.Error(), nil))
 		}
 		return err
 	}
@@ -2910,7 +2921,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	if currentAssignment == nil {
 		err = fmt.Errorf("bead %s does not have an active assignment", beadID)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "NOT_ASSIGNED", err.Error(), nil))
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "NOT_ASSIGNED", err.Error(), nil))
 		}
 		return err
 	}
@@ -2919,7 +2930,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	if currentAssignment.Status != assignment.StatusWorking {
 		err = fmt.Errorf("bead %s assignment is not reassignable from status %s", beadID, currentAssignment.Status)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "INVALID_STATE", err.Error(), map[string]interface{}{
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "INVALID_STATE", err.Error(), map[string]interface{}{
 				"current_status": string(currentAssignment.Status),
 			}))
 		}
@@ -2931,7 +2942,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	if err != nil {
 		err = fmt.Errorf("failed to get panes: %w", err)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "TMUX_ERROR", err.Error(), nil))
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "TMUX_ERROR", err.Error(), nil))
 		}
 		return err
 	}
@@ -2950,7 +2961,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 		if targetPane == nil {
 			err = fmt.Errorf("pane %d not found in session %s", assignToPane, session)
 			if IsJSONOutput() {
-				return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "PANE_NOT_FOUND", err.Error(), nil))
+				return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "PANE_NOT_FOUND", err.Error(), nil))
 			}
 			return err
 		}
@@ -2958,7 +2969,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 		if targetAgentType == "user" || targetAgentType == "unknown" {
 			err = fmt.Errorf("pane %d is not an agent pane (type: %s)", assignToPane, targetAgentType)
 			if IsJSONOutput() {
-				return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "PANE_NOT_FOUND", err.Error(), nil))
+				return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "PANE_NOT_FOUND", err.Error(), nil))
 			}
 			return err
 		}
@@ -2967,14 +2978,14 @@ func runReassignment(cmd *cobra.Command, session string) error {
 		idleAgents, err := getIdleAgents(session, assignToType, assignVerbose)
 		if err != nil {
 			if IsJSONOutput() {
-				return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "TMUX_ERROR", err.Error(), nil))
+				return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "TMUX_ERROR", err.Error(), nil))
 			}
 			return err
 		}
 		if len(idleAgents) == 0 {
 			err = fmt.Errorf("no idle %s agents available", assignToType)
 			if IsJSONOutput() {
-				return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "NO_IDLE_AGENT", err.Error(), map[string]interface{}{
+				return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "NO_IDLE_AGENT", err.Error(), map[string]interface{}{
 					"agent_type": assignToType,
 				}))
 			}
@@ -2989,7 +3000,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	if targetPane.Index == currentAssignment.Pane {
 		err = fmt.Errorf("bead %s is already assigned to pane %d", beadID, targetPane.Index)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "ALREADY_ASSIGNED", err.Error(), nil))
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "ALREADY_ASSIGNED", err.Error(), nil))
 		}
 		return err
 	}
@@ -3010,7 +3021,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 		}
 		err = fmt.Errorf("pane %d is busy (state: %s), use --force to override", targetPane.Index, state)
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "TARGET_BUSY", err.Error(), details))
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "TARGET_BUSY", err.Error(), details))
 		}
 		return err
 	}
@@ -3040,7 +3051,7 @@ func runReassignment(cmd *cobra.Command, session string) error {
 	_, err = store.Reassign(beadID, targetPane.Index, targetAgentType, newAgentName)
 	if err != nil {
 		if IsJSONOutput() {
-			return json.NewEncoder(os.Stdout).Encode(makeReassignErrorEnvelope(session, "REASSIGN_ERROR", err.Error(), nil))
+			return emitJSONFailureEnvelope(makeReassignErrorEnvelope(session, "REASSIGN_ERROR", err.Error(), nil))
 		}
 		return err
 	}

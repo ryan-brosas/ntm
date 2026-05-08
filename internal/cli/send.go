@@ -1159,10 +1159,16 @@ func runSendInternal(opts SendOptions) (err error) {
 				ErrorCode: code,
 				Error:     err.Error(),
 			}
-			_ = json.NewEncoder(os.Stdout).Encode(result)
-			// Return error to ensure non-zero exit code
-			// Since SilenceErrors is true, Cobra won't print the error message again
-			return err
+			// bd-oqwmf: route JSON failure through jsonFailureExit so root
+			// Execute uniformly suppresses duplicate stderr (the JSON
+			// envelope is the canonical surface) and exits non-zero. The
+			// original err is joined into the result so callers using
+			// errors.As (e.g. tests checking for redactionBlockedError)
+			// still see the typed underlying error in the chain.
+			if encErr := json.NewEncoder(os.Stdout).Encode(result); encErr != nil {
+				return encErr
+			}
+			return errors.Join(errJSONFailure, err)
 		}
 		return err
 	}
@@ -1558,7 +1564,8 @@ func runSendInternal(opts SendOptions) (err error) {
 					RoutedTo:             opts.routingResult,
 					Error:                err.Error(),
 				}
-				return json.NewEncoder(os.Stdout).Encode(result)
+				// bd-oqwmf: signal non-zero exit after the success:false envelope.
+				return emitJSONFailureEnvelope(result)
 			}
 			return err
 		}
@@ -3712,7 +3719,17 @@ summary:
 		if interrupted {
 			batchResult.Error = "interrupted by user"
 		}
-		return json.NewEncoder(os.Stdout).Encode(batchResult)
+		// bd-oqwmf: batch dispatch is dynamic (Success may be false when
+		// any prompt failed or the loop was interrupted). Encode then
+		// route through jsonFailureExit on the failure branch so $? is
+		// honest for partial/total batch failure.
+		if encErr := json.NewEncoder(os.Stdout).Encode(batchResult); encErr != nil {
+			return encErr
+		}
+		if !batchResult.Success {
+			return jsonFailureExit()
+		}
+		return nil
 	}
 
 	// Summary

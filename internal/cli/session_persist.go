@@ -119,6 +119,16 @@ func runSessionsSave(sessionName string, opts session.SaveOptions) error {
 		return err
 	}
 
+	// bd-oqwmf: emitSaveFailure writes the success:false envelope and
+	// signals non-zero exit so `ntm sessions save --json` automation
+	// gating on `$?` no longer treats failure as success.
+	emitSaveFailure := func(result *SessionsSaveResult) error {
+		if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
+			return encErr
+		}
+		return jsonFailureExit()
+	}
+
 	res, err := ResolveSessionWithOptions(sessionName, os.Stdout, SessionResolveOptions{TreatAsJSON: IsJSONOutput()})
 	if err != nil {
 		if IsJSONOutput() {
@@ -133,34 +143,31 @@ func runSessionsSave(sessionName string, opts session.SaveOptions) error {
 	sessionName = res.Session
 
 	if !tmux.SessionExists(sessionName) {
-		result := &SessionsSaveResult{
+		return emitSaveFailure(&SessionsSaveResult{
 			Success: false,
 			Session: sessionName,
 			Error:   fmt.Sprintf("session '%s' not found", sessionName),
-		}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
+		})
 	}
 
 	// Capture state
 	state, err := session.Capture(sessionName)
 	if err != nil {
-		result := &SessionsSaveResult{
+		return emitSaveFailure(&SessionsSaveResult{
 			Success: false,
 			Session: sessionName,
 			Error:   err.Error(),
-		}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
+		})
 	}
 
 	// Save state
 	path, err := session.Save(state, opts)
 	if err != nil {
-		result := &SessionsSaveResult{
+		return emitSaveFailure(&SessionsSaveResult{
 			Success: false,
 			Session: sessionName,
 			Error:   err.Error(),
-		}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
+		})
 	}
 
 	savedName := opts.Name
@@ -444,25 +451,32 @@ func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, l
 		return err
 	}
 
+	// bd-oqwmf: emitRestoreFailure writes the success:false envelope and
+	// signals non-zero exit (parity with bd-usgfy).
+	emitRestoreFailure := func(result *SessionsRestoreResult) error {
+		if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
+			return encErr
+		}
+		return jsonFailureExit()
+	}
+
 	// Load saved state
 	state, err := session.Load(savedName)
 	if err != nil {
-		result := &SessionsRestoreResult{
+		return emitRestoreFailure(&SessionsRestoreResult{
 			Success:   false,
 			SavedName: savedName,
 			Error:     err.Error(),
-		}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
+		})
 	}
 
 	// Restore session
 	if err := session.Restore(state, opts); err != nil {
-		result := &SessionsRestoreResult{
+		return emitRestoreFailure(&SessionsRestoreResult{
 			Success:   false,
 			SavedName: savedName,
 			Error:     err.Error(),
-		}
-		return output.New(output.WithJSON(jsonOutput)).Output(result)
+		})
 	}
 
 	restoredName := opts.Name

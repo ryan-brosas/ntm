@@ -322,9 +322,15 @@ func runEnsembleSpawn(cmd *cobra.Command, opts ensembleSpawnOptions) error {
 	}
 
 	if IsJSONOutput() {
-		_ = output.PrintJSON(out)
-		if err != nil {
-			return err
+		// bd-oqwmf: when out.Success is false (the upstream err set it
+		// at line 320), signal jsonFailureExit after the envelope so the
+		// caller exits non-zero AND root.Execute suppresses the duplicate
+		// stderr line.
+		if encErr := output.PrintJSON(out); encErr != nil {
+			return encErr
+		}
+		if !out.Success {
+			return jsonFailureExit()
 		}
 		return nil
 	}
@@ -599,14 +605,19 @@ type ensembleDryRunPreamble struct {
 func runEnsembleDryRun(cmd *cobra.Command, opts ensembleSpawnOptions, manager *ensemble.EnsembleManager, agentMix map[string]int, projectDir string) error {
 	outputError := func(err error) error {
 		if IsJSONOutput() {
-			_ = output.PrintJSON(ensembleDryRunOutput{
+			// bd-oqwmf: after writing the success:false envelope to stdout,
+			// signal jsonFailureExit so root.Execute suppresses the
+			// duplicate stderr "Error: ..." line and still exits non-zero.
+			if encErr := output.PrintJSON(ensembleDryRunOutput{
 				Success:     false,
 				DryRun:      true,
 				GeneratedAt: output.Timestamp(),
 				Session:     opts.Session,
 				Error:       err.Error(),
-			})
-			return err
+			}); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
 		}
 		return err
 	}

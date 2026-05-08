@@ -703,5 +703,14 @@ func humanizeDuration(d time.Duration) string {
 func outputResumeJSON(cmd *cobra.Command, result *ResumeResult) error {
 	encoder := json.NewEncoder(cmd.OutOrStdout())
 	encoder.SetIndent("", "  ")
-	return encoder.Encode(result)
+	if err := encoder.Encode(result); err != nil {
+		return err
+	}
+	// bd-oqwmf: signal non-zero exit when the resume envelope reports
+	// failure, so `ntm resume --json` automation gating on `$?` no longer
+	// silently misses "no handoff found" / validation errors.
+	if result != nil && !result.Success {
+		return jsonFailureExit()
+	}
+	return nil
 }

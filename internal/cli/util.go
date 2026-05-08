@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -779,3 +780,18 @@ var errJSONFailure = errors.New("ntm: command failed (JSON envelope written)")
 // any other failure path that wrote a `success:false` envelope must signal
 // non-zero exit through this helper.
 func jsonFailureExit() error { return errJSONFailure }
+
+// emitJSONFailureEnvelope encodes a `success:false` envelope to stdout and
+// signals a non-zero exit via errJSONFailure (bd-oqwmf). Use this in place
+// of `return json.NewEncoder(os.Stdout).Encode(envelope)` at sites that
+// emit a failure envelope — the bare-Encode form returns nil on success
+// and silently exits 0, defeating shell `$?` gating.
+//
+// On encode failure, the encoder error is returned as-is so it surfaces
+// on stderr with the usual "Error: ..." formatting.
+func emitJSONFailureEnvelope(v interface{}) error {
+	if encErr := json.NewEncoder(os.Stdout).Encode(v); encErr != nil {
+		return encErr
+	}
+	return errJSONFailure
+}

@@ -584,7 +584,10 @@ func outputRebalanceError(session, errMsg string) error {
 	}
 	data, _ := json.MarshalIndent(resp, "", "  ")
 	fmt.Println(string(data))
-	return fmt.Errorf("%s", errMsg)
+	// bd-oqwmf: signal non-zero exit AND suppress the duplicate stderr
+	// "Error: ..." line that fmt.Errorf would surface (the JSON envelope
+	// printed above is the canonical failure surface for `--json` mode).
+	return jsonFailureExit()
 }
 
 func outputRebalanceJSON(v interface{}) error {

@@ -157,10 +157,16 @@ func runSupportBundle(ctx context.Context, opts supportBundleOptions) error {
 	result, err := createSupportBundle(ctx, outputPath, opts)
 	if err != nil {
 		if opts.RobotMode {
-			return robot.Output(BundleResult{
+			// bd-oqwmf: signal non-zero exit after writing the
+			// success:false envelope so `ntm support-bundle --json`
+			// automation can gate on `$?`.
+			if outErr := robot.Output(BundleResult{
 				Success: false,
 				Error:   err.Error(),
-			}, robot.FormatJSON)
+			}, robot.FormatJSON); outErr != nil {
+				return outErr
+			}
+			return jsonFailureExit()
 		}
 		return err
 	}
