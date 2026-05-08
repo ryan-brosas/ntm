@@ -988,10 +988,15 @@ func (e *Executor) executeStepOnce(ctx context.Context, step *Step, workflow *Wo
 	result.PaneUsed = paneID
 	result.AgentType = agentType
 
-	// Dry run mode - don't actually execute
+	// Dry run mode - don't actually execute.
+	// bd-g40ad: sanitize the post-substitution prompt before truncating —
+	// ${steps.X.output} from an upstream agent can inject ANSI/OSC/C0
+	// sequences (clear-screen, clipboard hijack, BEL) that would otherwise
+	// reach the operator's terminal during --dry-run. Same attack class
+	// bd-82zsc patched for command steps.
 	if e.config.DryRun {
 		result.Status = StatusCompleted
-		result.Output = dryRunOutput(step, "Would execute: "+truncatePrompt(prompt, 100))
+		result.Output = dryRunOutput(step, "Would execute: "+truncatePrompt(SanitizeDescriptionForTerminal(prompt), 100))
 		result.FinishedAt = time.Now()
 		return result
 	}
@@ -2257,10 +2262,11 @@ func (e *Executor) executeParallelStep(ctx context.Context, step *Step, workflow
 			goto HANDLE_RESULT
 		}
 
-		// Dry run mode
+		// Dry run mode. bd-g40ad: sanitize before truncate — same attack
+		// class as bd-82zsc, mirrored here for parallel sub-step retries.
 		if e.config.DryRun {
 			result.Status = StatusCompleted
-			result.Output = dryRunOutput(step, "Would execute: "+truncatePrompt(prompt, 100))
+			result.Output = dryRunOutput(step, "Would execute: "+truncatePrompt(SanitizeDescriptionForTerminal(prompt), 100))
 			result.FinishedAt = time.Now()
 			return result
 		}

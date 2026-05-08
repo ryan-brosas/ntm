@@ -106,9 +106,13 @@ func (e *Executor) executeBranch(ctx context.Context, step *Step, workflow *Work
 		"agent_type", "branch",
 	)
 
+	// bd-g40ad: sanitize the predicate string before truncating. step.Branch
+	// is raw author config today, but the same pattern is applied across
+	// every dry-run banner so a future substitution change cannot reopen
+	// the operator-terminal hijack vector bd-82zsc / bd-g40ad close.
 	if e.config.DryRun {
 		result.Status = StatusCompleted
-		result.Output = dryRunOutput(step, "Would evaluate branch predicate: "+truncatePrompt(step.Branch, 80))
+		result.Output = dryRunOutput(step, "Would evaluate branch predicate: "+truncatePrompt(SanitizeDescriptionForTerminal(step.Branch), 80))
 		result.FinishedAt = time.Now()
 		return result
 	}

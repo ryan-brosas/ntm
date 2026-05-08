@@ -3190,6 +3190,36 @@ func TestExecuteCommand_DryRun_SanitizesControlBytes(t *testing.T) {
 	}
 }
 
+// TestExecuteStepOnce_DryRun_SanitizesAgentPrompt covers bd-g40ad: the
+// agent-prompt dry-run banner emitted by executeStepOnce must scrub
+// ANSI/OSC/C0 control bytes from the post-substitution prompt. Same
+// attack class as bd-82zsc — an upstream agent step's output can be
+// referenced via ${steps.X.output} in a downstream agent prompt and
+// printed verbatim during --dry-run unless sanitized first.
+func TestExecuteStepOnce_DryRun_SanitizesAgentPrompt(t *testing.T) {
+	e := newCommandTestExecutor(t)
+	e.config.DryRun = true
+	e.state.Steps["evil"] = StepResult{Output: "\x1b[2J\x1b[H\x07payload"}
+
+	step := &Step{
+		ID:     "dryrun-agent",
+		Prompt: "${steps.evil.output}",
+	}
+	result := e.executeStepOnce(context.Background(), step, &Workflow{Name: "test"})
+
+	if result.Status != StatusCompleted {
+		t.Fatalf("Status = %q, want %q; error = %+v", result.Status, StatusCompleted, result.Error)
+	}
+	for _, b := range []byte(result.Output) {
+		if b == '\x1b' || b == '\x07' || b == '\x00' {
+			t.Fatalf("dry-run agent banner contains unsanitized control byte 0x%02x: %q", b, result.Output)
+		}
+	}
+	if !strings.Contains(result.Output, "payload") {
+		t.Errorf("dry-run agent banner dropped the trailing payload after sanitizing controls: %q", result.Output)
+	}
+}
+
 func TestExecuteCommand_Timeout(t *testing.T) {
 	e := newCommandTestExecutor(t)
 	step := &Step{
