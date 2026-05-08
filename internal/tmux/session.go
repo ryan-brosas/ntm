@@ -621,14 +621,14 @@ func SplitWindow(session string, directory string) (string, error) {
 // to prevent shells/processes from overwriting NTM's pane naming convention.
 func (c *Client) SetPaneTitle(paneID, title string) error {
 	selectErr := c.RunSilent("select-pane", "-t", paneID, "-T", title)
-	if selectErr != nil && strings.Contains(selectErr.Error(), "can't find pane") {
+	if selectErr != nil && ClassifyCommandError(selectErr).Kind == CommandErrorPaneNotFound {
 		// On busy tmux servers, newly-created panes can transiently fail to resolve by ID.
 		// Retry briefly to reduce flakiness (especially under `go test`).
 		const attempts = 5
 		for i := 0; i < attempts && selectErr != nil; i++ {
 			time.Sleep(50 * time.Millisecond)
 			selectErr = c.RunSilent("select-pane", "-t", paneID, "-T", title)
-			if selectErr != nil && !strings.Contains(selectErr.Error(), "can't find pane") {
+			if selectErr != nil && ClassifyCommandError(selectErr).Kind != CommandErrorPaneNotFound {
 				break
 			}
 		}
