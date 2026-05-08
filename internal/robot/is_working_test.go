@@ -327,6 +327,30 @@ codex>
 	}
 }
 
+// TestIsLiveBusy_WildcardPatternsDocumentTheUserPaneSkipReason locks in the
+// reason GetIsWorking gates the live-window override on `state.Type` being a
+// known AI agent: the pattern library carries agent-agnostic CategoryThinking
+// patterns (notably the braille spinner, which is unanchored and matches
+// anywhere) that will fire on incidental shell output. If the override fired
+// on user/unknown panes, a `tar`-style spinner or a starship-flavored prompt
+// would falsely flip the pane into the working bucket. The GetIsWorking call
+// site filters for AI agents specifically so this never reaches
+// PaneWorkStatus, but the predicate itself remains permissive — keep this
+// test as the load-bearing canary if the wildcard set is ever rewritten.
+func TestIsLiveBusy_WildcardPatternsDocumentTheUserPaneSkipReason(t *testing.T) {
+	// Braille spinner pattern is `[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]` with Agent: "*", and it is
+	// unanchored (no $ at the end of the regex), so any line containing one
+	// of those chars matches. With a user hint the predicate still says
+	// "live-busy" — so the GetIsWorking site must skip the override for
+	// AgentTypeUser to avoid a false flip.
+	shellScrollback := `$ tar -xzf data.tar.gz
+extracting archive ⠋
+`
+	if !IsLiveBusy(shellScrollback, agent.AgentTypeUser.String()) {
+		t.Fatalf("expected wildcard CategoryThinking match (braille_spinner) on shell scrollback with user hint; if this assertion changes, the GetIsWorking user-pane skip may no longer be needed")
+	}
+}
+
 // Helper function for substring matching
 func containsSubstring(s, substr string) bool {
 	return len(s) >= len(substr) && hasSubstr(s, substr)

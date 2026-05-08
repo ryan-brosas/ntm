@@ -294,6 +294,14 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 		// same override before dispatch; this brings the restart/health
 		// surfaces into agreement with --robot-activity / IsLiveBusy.
 		//
+		// Skip the override on user/unknown panes: the wildcard
+		// CategoryThinking patterns in the library (braille spinner,
+		// "loading…", "processing…", trailing dots) would otherwise falsely
+		// flag normal shell output as agent work, and these panes have no
+		// AI agent for --robot-is-working to reason about. Use state.Type
+		// (parser's view, hint-confirmed) rather than the raw tmux hint so
+		// content-detected agents on hint-less panes still get the override.
+		//
 		// Re-derive the recommendation from the corrected state so we keep
 		// higher-priority signals (RateLimitedWait, ErrorState,
 		// ContextLowContinue) when they apply, and only fall through to
@@ -302,7 +310,10 @@ func GetIsWorking(opts IsWorkingOptions) (*IsWorkingOutput, error) {
 		// `state.IsIdle` is safe: ParseWithHint returns a freshly-allocated
 		// *AgentState per call, and only state.RawSample is read after this
 		// point — that field is not touched by the override.
-		if IsLiveBusy(content, paneHints[paneIdx].String()) {
+		isAIAgentPane := state.Type != "" &&
+			state.Type != agent.AgentTypeUser &&
+			state.Type != agent.AgentTypeUnknown
+		if isAIAgentPane && IsLiveBusy(content, string(state.Type)) {
 			state.IsWorking = true
 			state.IsIdle = false
 			status.IsWorking = true
