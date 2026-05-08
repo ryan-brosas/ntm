@@ -652,3 +652,37 @@ func TestDetectProgress_ConfidenceAndIndicators(t *testing.T) {
 		t.Error("Expected non-empty indicators")
 	}
 }
+
+// bd-v9sbz: hasRateLimitChatter must catch the phrasings of the
+// major agent CLIs (claude/cc, codex/cod, gemini/gmi) so the
+// 50-line second-chance scan in detectRateLimit doesn't miss
+// rate-limit messages that are common in the wild.
+func TestHasRateLimitChatter_CoversCommonAgentPhrasings(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, input string
+		want        bool
+	}{
+		{"empty", "", false},
+		{"unrelated", "the build completed normally", false},
+
+		{"throttle marker", "API throttled, slow down", true},
+		{"retry word", "Please retry the request", true},
+		{"try again", "rate-limited; try again later", true},
+		{"cooldown", "in cooldown for 60s", true},
+
+		// New agent-specific phrasings added by bd-v9sbz.
+		{"claude rate limit", "Rate limit reached; please retry", true},
+		{"openai too many", "429 Too Many Requests", true},
+		{"gemini quota", "Quota exceeded for this model", true},
+		{"google resource exhausted", "RESOURCE_EXHAUSTED: try again", true},
+		{"codex rate exceeded", "rate exceeded; backing off", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := hasRateLimitChatter(c.input); got != c.want {
+				t.Errorf("hasRateLimitChatter(%q) = %v, want %v", c.input, got, c.want)
+			}
+		})
+	}
+}

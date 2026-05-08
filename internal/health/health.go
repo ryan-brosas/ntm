@@ -377,9 +377,29 @@ func hasIssueType(issues []Issue, issueType string) bool {
 	return false
 }
 
+// hasRateLimitChatter is the cheap pre-filter that gates the
+// detectRateLimit second-chance scan over the larger 50-line context
+// window. The keyword list intentionally covers (a) generic
+// throttling phrases and (b) the explicit phrasings used by the major
+// agent CLIs (claude/cc, codex/cod, gemini/gmi) so we don't miss a
+// rate-limit signal that scrolled out of the trailing 20 lines.
+//
+// New markers should follow the existing form (lowercased, substring
+// safe, agent-CLI agnostic). Avoid adding terms so generic they
+// match arbitrary chatter (e.g. "wait" alone).
 func hasRateLimitChatter(output string) bool {
 	cleaned := strings.ToLower(status.StripANSI(output))
-	for _, marker := range []string{"retry", "try again", "cooldown", "throttl"} {
+	for _, marker := range []string{
+		"retry",
+		"try again",
+		"cooldown",
+		"throttl",
+		"rate limit",
+		"rate exceeded",
+		"quota",
+		"too many requests",
+		"resource exhausted",
+	} {
 		if strings.Contains(cleaned, marker) {
 			return true
 		}
