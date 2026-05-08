@@ -130,6 +130,35 @@ func TestBuildQueueDryRecommendationsActionable(t *testing.T) {
 	}
 }
 
+func TestQueueDryReservationTimeoutIsInteractive(t *testing.T) {
+	if queueDryReservationTimeout != 2*time.Second {
+		t.Fatalf("queueDryReservationTimeout = %s, want 2s", queueDryReservationTimeout)
+	}
+}
+
+func TestAppendQueueDryReservationWarning(t *testing.T) {
+	report := QueueDryResponse{
+		Evidence: QueueDryEvidence{
+			Reservations: QueueDryReservations{
+				Available: false,
+				Error:     "context deadline exceeded",
+			},
+		},
+	}
+
+	appendQueueDryReservationWarning(&report)
+
+	if len(report.Warnings) != 1 {
+		t.Fatalf("warnings=%v, want one warning", report.Warnings)
+	}
+	if !strings.Contains(report.Warnings[0], "reservations_unavailable") {
+		t.Fatalf("warning=%q, want reservations_unavailable marker", report.Warnings[0])
+	}
+	if !strings.Contains(report.Warnings[0], "context deadline exceeded") {
+		t.Fatalf("warning=%q, want original error text", report.Warnings[0])
+	}
+}
+
 func mustMkdirAll(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {
