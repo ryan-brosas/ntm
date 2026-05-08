@@ -987,6 +987,102 @@ func TestOnSuccessFiresForTopLevelLoop(t *testing.T) {
 	}
 }
 
+func TestOnSuccessFiresForTopLevelBranch(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("on-success-branch"))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "on-success-branch-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID:     "route",
+			Branch: "go",
+			Branches: map[string]interface{}{
+				"go": map[string]interface{}{
+					"id":      "chosen",
+					"command": "echo chosen",
+				},
+			},
+			OnSuccess: []Step{{ID: "notify", Command: "echo notified"}},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if got := state.Steps["route"]; got.Status != StatusCompleted {
+		t.Fatalf("parent route status = %q, want %q (error=%+v)", got.Status, StatusCompleted, got.Error)
+	}
+	if got := state.Steps["route_on_success_notify"]; got.Status != StatusCompleted {
+		t.Fatalf("on_success step status = %q, want %q (error=%+v)", got.Status, StatusCompleted, got.Error)
+	}
+}
+
+func TestOnSuccessFiresForTopLevelForeach(t *testing.T) {
+	executor := NewExecutor(DefaultExecutorConfig("on-success-foreach-parent"))
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "on-success-foreach-parent-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "fanout",
+			Foreach: &ForeachConfig{
+				Items: `["one"]`,
+				Steps: []Step{{
+					ID:      "body",
+					Command: "echo body",
+				}},
+			},
+			OnSuccess: []Step{{ID: "notify", Command: "echo notified"}},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if got := state.Steps["fanout"]; got.Status != StatusCompleted {
+		t.Fatalf("parent fanout status = %q, want %q (error=%+v)", got.Status, StatusCompleted, got.Error)
+	}
+	if got := state.Steps["fanout_on_success_notify"]; got.Status != StatusCompleted {
+		t.Fatalf("on_success step status = %q, want %q (error=%+v)", got.Status, StatusCompleted, got.Error)
+	}
+}
+
+func TestOnSuccessFiresForTopLevelBeadQuery(t *testing.T) {
+	cfg := DefaultExecutorConfig("on-success-bead-query")
+	cfg.BeadQueryRunBr = func(ctx context.Context, args []string) ([]byte, error) {
+		return []byte(`{"issues":[]}`), nil
+	}
+	executor := NewExecutor(cfg)
+
+	workflow := &Workflow{
+		SchemaVersion: SchemaVersion,
+		Name:          "on-success-bead-query-workflow",
+		Settings:      DefaultWorkflowSettings(),
+		Steps: []Step{{
+			ID: "collect",
+			BeadQuery: &BeadQueryStep{
+				Status: "open",
+			},
+			OnSuccess: []Step{{ID: "notify", Command: "echo notified"}},
+		}},
+	}
+
+	state, err := executor.Run(context.Background(), workflow, nil, nil)
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if got := state.Steps["collect"]; got.Status != StatusCompleted {
+		t.Fatalf("parent collect status = %q, want %q (error=%+v)", got.Status, StatusCompleted, got.Error)
+	}
+	if got := state.Steps["collect_on_success_notify"]; got.Status != StatusCompleted {
+		t.Fatalf("on_success step status = %q, want %q (error=%+v)", got.Status, StatusCompleted, got.Error)
+	}
+}
+
 func TestBranchChildrenInsideForeachAreNamespaced(t *testing.T) {
 	executor := NewExecutor(DefaultExecutorConfig("branch-foreach"))
 
