@@ -64,6 +64,84 @@ func TestCompute_TimeToFirstAck_OnlyAckRequiredWithAck(t *testing.T) {
 	}
 }
 
+// bd-h1i8z: Distribution.Pending must surface the count of
+// ack-required messages with AckedAt=nil. Pre-fix this number was
+// computed and discarded via '_ = pending', so a swarm with 0 acks
+// + 50 pending was indistinguishable in JSON from 0 messages at all.
+func TestCompute_TimeToFirstAck_PendingCountIsSurfaced(t *testing.T) {
+	t.Parallel()
+	created := at(0)
+	in := Inputs{
+		Now: at(2 * time.Hour),
+		Mail: []MailEvent{
+			// 1 acked.
+			{ID: 1, CreatedAt: created, AckedAt: ptrAt(30 * time.Second), AckRequired: true},
+			// 3 pending (ack-required, AckedAt=nil).
+			{ID: 2, CreatedAt: created, AckedAt: nil, AckRequired: true},
+			{ID: 3, CreatedAt: created, AckedAt: nil, AckRequired: true},
+			{ID: 4, CreatedAt: created, AckedAt: nil, AckRequired: true},
+			// Non-ack-required pending — not counted as pending.
+			{ID: 5, CreatedAt: created, AckedAt: nil, AckRequired: false},
+		},
+	}
+	d := Compute(in).TimeToFirstAck
+	if d.Count != 1 {
+		t.Errorf("Count = %d, want 1 (one acked sample)", d.Count)
+	}
+	if d.Pending != 3 {
+		t.Fatalf("Pending = %d, want 3 (three ack-required, AckedAt=nil)", d.Pending)
+	}
+}
+
+// Pending=0 must NOT serialize the field, so existing consumers see
+// the same envelope when no acks are pending.
+func TestCompute_TimeToFirstAck_PendingZeroOmitsFromJSON(t *testing.T) {
+	t.Parallel()
+	created := at(0)
+	in := Inputs{
+		Now: at(2 * time.Hour),
+		Mail: []MailEvent{
+			{ID: 1, CreatedAt: created, AckedAt: ptrAt(30 * time.Second), AckRequired: true},
+		},
+	}
+	body, err := json.Marshal(Compute(in).TimeToFirstAck)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(body), `"pending"`) {
+		t.Errorf("zero Pending leaked into JSON: %s", body)
+	}
+}
+
+// All-pending fixture (no acks at all): Count=0, Pending=N. The
+// previous implementation reported the SAME envelope for "no
+// messages" and "N pending messages."
+func TestCompute_TimeToFirstAck_AllPendingDistinguishesFromEmpty(t *testing.T) {
+	t.Parallel()
+	created := at(0)
+	allPending := Inputs{
+		Now: at(2 * time.Hour),
+		Mail: []MailEvent{
+			{ID: 1, CreatedAt: created, AckedAt: nil, AckRequired: true},
+			{ID: 2, CreatedAt: created, AckedAt: nil, AckRequired: true},
+		},
+	}
+	empty := Inputs{Now: at(2 * time.Hour)}
+
+	allPendingDist := Compute(allPending).TimeToFirstAck
+	emptyDist := Compute(empty).TimeToFirstAck
+
+	if allPendingDist.Count != 0 || emptyDist.Count != 0 {
+		t.Fatalf("Counts must both be 0; got allPending=%d empty=%d", allPendingDist.Count, emptyDist.Count)
+	}
+	if allPendingDist.Pending != 2 {
+		t.Errorf("allPending.Pending = %d, want 2", allPendingDist.Pending)
+	}
+	if emptyDist.Pending != 0 {
+		t.Errorf("empty.Pending = %d, want 0", emptyDist.Pending)
+	}
+}
+
 func TestCompute_ReadyToClaim_PairsTransitions(t *testing.T) {
 	t.Parallel()
 	in := Inputs{

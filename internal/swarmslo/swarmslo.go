@@ -77,12 +77,20 @@ type Inputs struct {
 // Distribution is the per-metric summary shape. All durations are in
 // seconds (float64) so the JSON envelope stays consumer-friendly.
 type Distribution struct {
-	Count      int     `json:"count"`
-	P50Seconds float64 `json:"p50_seconds"`
-	P95Seconds float64 `json:"p95_seconds"`
-	MaxSeconds float64 `json:"max_seconds"`
+	Count       int     `json:"count"`
+	P50Seconds  float64 `json:"p50_seconds"`
+	P95Seconds  float64 `json:"p95_seconds"`
+	MaxSeconds  float64 `json:"max_seconds"`
 	MeanSeconds float64 `json:"mean_seconds"`
-	Missing    bool    `json:"missing_source,omitempty"`
+	// Pending counts samples that the metric is waiting on but
+	// could not measure yet. Currently used by time_to_first_ack
+	// for ack-required messages whose AckedAt is still nil — the
+	// docstring promised to surface this and the value used to be
+	// silently discarded (bd-h1i8z). 0 means "no pending state for
+	// this metric" or "this metric has no pending concept" — it is
+	// omitted from JSON in either case.
+	Pending int  `json:"pending,omitempty"`
+	Missing bool `json:"missing_source,omitempty"`
 }
 
 // Summary is the operator-facing JSON envelope.
@@ -137,7 +145,8 @@ func Compute(in Inputs) Summary {
 
 // computeAckLatencies measures (AckedAt - CreatedAt) over messages
 // that required an ack and have one. Unacked ack-required messages
-// are surfaced as count-of-pending in Warnings.
+// are reported via Distribution.Pending so consumers can distinguish
+// "no messages at all" from "many messages, all still pending."
 func computeAckLatencies(events []MailEvent) Distribution {
 	var seconds []float64
 	pending := 0
@@ -159,10 +168,7 @@ func computeAckLatencies(events []MailEvent) Distribution {
 		seconds = append(seconds, dt)
 	}
 	d := distributionFromSeconds(seconds)
-	// Pending is recorded out-of-band in the metric; surfacing it as
-	// a Distribution field would be misleading because it is a count
-	// of *unobserved* latencies, not a sample.
-	_ = pending
+	d.Pending = pending
 	return d
 }
 
