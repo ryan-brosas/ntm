@@ -116,7 +116,7 @@ func (a *CASSAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 					Latency:     latency,
 				}, nil
 			}
-			if !cassHealthIsHealthy(parsed.Status, parsed.Healthy, err) {
+			if !cassHealthIsHealthy(parsed.Status, parsed.Healthy) {
 				message := strings.TrimSpace(parsed.Status)
 				if message == "" {
 					message = "unhealthy"
@@ -166,7 +166,7 @@ func (a *CASSAdapter) Health(ctx context.Context) (*HealthStatus, error) {
 	}, nil
 }
 
-func cassHealthIsHealthy(status string, healthy *bool, cmdErr error) bool {
+func cassHealthIsHealthy(status string, healthy *bool) bool {
 	if healthy != nil {
 		return *healthy
 	}
@@ -185,8 +185,9 @@ func cassHealthIsHealthy(status string, healthy *bool, cmdErr error) bool {
 		return false
 	}
 
-	// Empty status + missing healthy falls back to process-level success.
-	return cmdErr == nil
+	// Empty status + missing healthy should fail closed. A schema-less
+	// success body does not prove cass is healthy.
+	return false
 }
 
 // HasCapability checks if cass has a specific capability

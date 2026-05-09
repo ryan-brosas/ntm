@@ -108,3 +108,21 @@ func TestCASSAdapter_HealthWithoutHealthyUnknownStatusFailsClosed(t *testing.T) 
 		t.Fatalf("Health() message = %q, want warning unhealthy message", health.Message)
 	}
 }
+
+func TestCASSAdapter_HealthWithoutHealthyAndStatusFailsClosed(t *testing.T) {
+	writeFakeCassHealthScript(t,
+		`{}`,
+		"0",
+	)
+
+	health, err := NewCASSAdapter().Health(context.Background())
+	if err != nil {
+		t.Fatalf("Health() error: %v", err)
+	}
+	if health.Healthy {
+		t.Fatalf("Health() Healthy = true, want false when schema omits both healthy and status")
+	}
+	if !strings.Contains(health.Message, "cass reports unhealthy: unhealthy") {
+		t.Fatalf("Health() message = %q, want fail-closed unhealthy message", health.Message)
+	}
+}
