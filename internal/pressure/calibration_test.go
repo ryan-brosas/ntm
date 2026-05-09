@@ -157,6 +157,39 @@ func TestCalibrateHostCapacityLowConfidenceDoesNotApply(t *testing.T) {
 	if len(report.Warnings) != 2 {
 		t.Fatalf("warnings = %d, want missing source + low confidence", len(report.Warnings))
 	}
+	if report.Warnings[1].Code != "low_confidence" {
+		t.Fatalf("warning code = %q, want low_confidence", report.Warnings[1].Code)
+	}
+}
+
+func TestCalibrateHostCapacityNoThresholdChangeWarningCode(t *testing.T) {
+	t.Parallel()
+	report := CalibrateHostCapacity(HostCapacityCalibrationInput{
+		ProfileID: "steady-host",
+		Baseline: map[Source]Thresholds{
+			SourcePaneActivity: {Elevated: 100, High: 200, Critical: 300},
+		},
+		Evidence: []CalibrationEvidence{
+			{Source: SourcePaneActivity, Value: 120, Unit: "panes", Stable: true, Confidence: 0.9, SampleCount: 100, Reason: "synthetic_stable_120"},
+		},
+	})
+
+	if len(report.Recommendations) != 1 {
+		t.Fatalf("recommendations = %d, want 1", len(report.Recommendations))
+	}
+	rec := report.Recommendations[0]
+	if rec.Apply {
+		t.Fatalf("Apply = true, want false when thresholds already cover observed stable capacity")
+	}
+	if recommendationReasonBase(rec.Reason) != "no_threshold_change" {
+		t.Fatalf("Reason = %q, want no_threshold_change-prefixed reason", rec.Reason)
+	}
+	if len(report.Warnings) != 1 {
+		t.Fatalf("warnings = %d, want 1", len(report.Warnings))
+	}
+	if report.Warnings[0].Code != "no_threshold_change" {
+		t.Fatalf("warning code = %q, want no_threshold_change", report.Warnings[0].Code)
+	}
 }
 
 func TestCalibrateHostCapacityDeterministicJSONOrdering(t *testing.T) {

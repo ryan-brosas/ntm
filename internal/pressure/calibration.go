@@ -219,7 +219,7 @@ func CalibrateHostCapacity(in HostCapacityCalibrationInput) HostCapacityCalibrat
 		out.LogRows = append(out.LogRows, logRowsForRecommendation(out.ProfileID, rec)...)
 		if !rec.Apply {
 			out.Warnings = append(out.Warnings, CalibrationNote{
-				Code:    "low_confidence",
+				Code:    warningCodeForRecommendationReason(rec.Reason),
 				Message: string(source) + " recommendation not applied: " + rec.Reason,
 			})
 		}
@@ -478,4 +478,23 @@ func syntheticRunReason(run SyntheticCalibrationMetrics, stable bool) string {
 		return "synthetic_" + state
 	}
 	return "synthetic_" + state + "_" + id
+}
+
+func warningCodeForRecommendationReason(reason string) string {
+	base := recommendationReasonBase(reason)
+	switch base {
+	case "low_confidence", "no_threshold_change", "no_usable_evidence":
+		return base
+	default:
+		return "not_applied"
+	}
+}
+
+func recommendationReasonBase(reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return ""
+	}
+	base, _, _ := strings.Cut(reason, ":")
+	return strings.TrimSpace(base)
 }
