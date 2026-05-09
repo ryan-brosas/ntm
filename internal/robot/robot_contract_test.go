@@ -67,10 +67,16 @@ type mockContractReporter struct {
 	messages    []string
 }
 
-func (m *mockContractReporter) Helper()                                      { m.helperCalls++ }
-func (m *mockContractReporter) Errorf(format string, args ...interface{})    { m.errored = true; m.messages = append(m.messages, fmt.Sprintf(format, args...)) }
-func (m *mockContractReporter) Fatalf(format string, args ...interface{}) { m.fataled = true; m.messages = append(m.messages, fmt.Sprintf(format, args...)) }
-func (m *mockContractReporter) failed() bool                                 { return m.errored || m.fataled }
+func (m *mockContractReporter) Helper() { m.helperCalls++ }
+func (m *mockContractReporter) Errorf(format string, args ...interface{}) {
+	m.errored = true
+	m.messages = append(m.messages, fmt.Sprintf(format, args...))
+}
+func (m *mockContractReporter) Fatalf(format string, args ...interface{}) {
+	m.fataled = true
+	m.messages = append(m.messages, fmt.Sprintf(format, args...))
+}
+func (m *mockContractReporter) failed() bool { return m.errored || m.fataled }
 
 // robotContractCase describes one command-under-test for the
 // conformance suite. It captures both the input invocation (via the
