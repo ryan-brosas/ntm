@@ -74,6 +74,22 @@ func TestExtractTarGz_NormalEntryUnderCapSucceeds(t *testing.T) {
 	}
 }
 
+func TestExtractTarGz_NestedEntryWithoutDirectoryHeaderSucceeds(t *testing.T) {
+	archive := writeTarGzWithEntry(t, "release/ntm", []byte("hello"), 0o755)
+	dest := t.TempDir()
+
+	binaryPath, err := extractTarGz(archive, dest)
+	if err != nil {
+		t.Fatalf("extractTarGz failed: %v", err)
+	}
+	if filepath.Base(binaryPath) != "ntm" {
+		t.Errorf("binary path = %q, want path ending in ntm", binaryPath)
+	}
+	if _, err := os.Stat(binaryPath); err != nil {
+		t.Fatalf("stat extracted nested binary: %v", err)
+	}
+}
+
 func TestExtractTarGz_EntryExceedsCapErrorsWithBombMessage(t *testing.T) {
 	prev := maxArchiveEntryBytes
 	maxArchiveEntryBytes = 1024 // 1 KB ceiling

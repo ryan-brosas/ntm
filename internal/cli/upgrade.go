@@ -1118,6 +1118,10 @@ func extractTarGz(archivePath, destDir string) (string, error) {
 				binaryPath = target
 			}
 
+			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+				return "", err
+			}
+
 			// bd-o7fx1: defense-in-depth — strip setuid/setgid/sticky.
 			// Currently os.FileMode(header.Mode) (a uint32 cast) does
 			// not flip the Go-level ModeSetuid bit, so os.OpenFile
