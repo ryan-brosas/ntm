@@ -239,12 +239,21 @@ func hasUnhealthyGraph(health GraphHealth) bool {
 }
 
 func hasFailedCloseoutProof(items []CloseoutProofEvidence) bool {
+	// "red" is matched as a whole token (via tokenSet) to avoid false
+	// positives in common words like "credentials", "required",
+	// "redacted", "predicted", and "deferred". The remaining markers
+	// are long enough that substring matching does not collide with
+	// unrelated English. (bd-sra1j)
+	substringMarkers := []string{"failed", "failure", "skipped", "missing verification", "not verified"}
 	for _, item := range items {
 		text := strings.ToLower(strings.Join(append(append([]string{}, item.Signals...), item.Summary, item.Path), " "))
-		for _, marker := range []string{"failed", "failure", "red", "skipped", "missing verification", "not verified"} {
+		for _, marker := range substringMarkers {
 			if strings.Contains(text, marker) {
 				return true
 			}
+		}
+		if _, ok := tokenSet(text)["red"]; ok {
+			return true
 		}
 	}
 	return false

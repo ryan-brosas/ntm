@@ -123,6 +123,51 @@ func TestNoveltyGuardValidatesCloseoutSignals(t *testing.T) {
 	}
 }
 
+func TestHasFailedCloseoutProofRedTokenDoesNotMatchSubstring(t *testing.T) {
+	// bd-sra1j: pre-fix, hasFailedCloseoutProof matched the marker
+	// "red" via strings.Contains, so summaries containing words like
+	// "credentials", "required", "redacted", "predicted", or
+	// "deferred" silently flipped the novelty guard onto
+	// validate_closeout. Pin both the negative cases (no failure
+	// signal) and the positive cases ("status: red", bare "red"
+	// token) so any reintroduction of a substring match is caught.
+	negativeSummaries := []string{
+		"credentials renewed for next sprint",
+		"required environment variable documented",
+		"sensitive contents redacted from output",
+		"predicted memory usage within budget",
+		"deferred follow-up captured in bd-zzzz",
+	}
+	for _, summary := range negativeSummaries {
+		got := hasFailedCloseoutProof([]CloseoutProofEvidence{
+			{ID: "proof", Summary: summary},
+		})
+		if got {
+			t.Errorf("hasFailedCloseoutProof(%q) = true, want false (no real failure marker)", summary)
+		}
+	}
+
+	positiveSummaries := []string{
+		"verification status: red after retry",
+		"red",
+		"closeout proof red flag raised",
+	}
+	for _, summary := range positiveSummaries {
+		got := hasFailedCloseoutProof([]CloseoutProofEvidence{
+			{ID: "proof", Summary: summary},
+		})
+		if !got {
+			t.Errorf("hasFailedCloseoutProof(%q) = false, want true (whole-token red)", summary)
+		}
+	}
+
+	if !hasFailedCloseoutProof([]CloseoutProofEvidence{
+		{ID: "proof", Summary: "everything fine", Signals: []string{"go test failed for package"}},
+	}) {
+		t.Fatalf("substring marker 'failed' should still trigger via Signals")
+	}
+}
+
 func TestNoveltyGuardAdditionalDeclaredSignals(t *testing.T) {
 	ranking := RankingResult{
 		Decision:       RankingDecisionIdeate,
