@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
+	"github.com/Dicklesworthstone/ntm/internal/reservationsim"
+	"github.com/Dicklesworthstone/ntm/internal/worktrees"
 )
 
 func newLocksCmd() *cobra.Command {
@@ -37,6 +40,7 @@ Examples:
 
 	cmd.AddCommand(
 		newLocksListCmd(),
+		newLocksAdviseCmd(),
 		newLocksForceReleaseCmd(),
 		newLocksRenewCmd(),
 	)
@@ -66,6 +70,245 @@ Examples:
 	cmd.Flags().BoolVar(&allAgents, "all-agents", false, "Show reservations for all agents")
 
 	return cmd
+}
+
+func newLocksAdviseCmd() *cobra.Command {
+	allAgents := true
+
+	cmd := &cobra.Command{
+		Use:   "advise <session>",
+		Short: "Score reservation and worktree risks without modifying them",
+		Long: `Score active file reservations and session worktrees in proof mode.
+
+This command only reports safe next actions such as renew, message holder,
+narrow reservation, inspect worktree, or ask human. It never force-releases
+reservations and never removes worktrees.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runLocksAdvise(args[0], allAgents)
+		},
+	}
+
+	cmd.Flags().BoolVar(&allAgents, "all-agents", true, "Score reservations for all project agents")
+	return cmd
+}
+
+// LocksAdviceResult is the proof-mode reservation/worktree advisor output.
+type LocksAdviceResult struct {
+	Success             bool                                    `json:"success"`
+	Session             string                                  `json:"session"`
+	Agent               string                                  `json:"agent,omitempty"`
+	ProjectKey          string                                  `json:"project_key"`
+	Mode                string                                  `json:"mode"`
+	AgentMailAvailable  bool                                    `json:"agent_mail_available"`
+	Warnings            []string                                `json:"warnings,omitempty"`
+	Reservations        reservationsim.ReservationAdvisorReport `json:"reservations"`
+	Worktrees           worktrees.WorktreeAdvisorReport         `json:"worktrees"`
+	LogRows             []LocksAdviceLogRow                     `json:"log_rows"`
+	RecommendationCount int                                     `json:"recommendation_count"`
+}
+
+// LocksAdviceLogRow joins reservation and worktree audit rows under one CLI shape.
+type LocksAdviceLogRow struct {
+	Source        string  `json:"source"`
+	ReservationID int     `json:"reservation_id"`
+	PathPattern   string  `json:"path_pattern"`
+	Holder        string  `json:"holder"`
+	WorktreePath  string  `json:"worktree_path"`
+	RiskScore     int     `json:"risk_score"`
+	Confidence    float64 `json:"confidence"`
+	Action        string  `json:"action"`
+}
+
+func runLocksAdvise(session string, allAgents bool) error {
+	session, projectKey, err := resolveAgentMailScope(session)
+	if err != nil {
+		return err
+	}
+
+	warnings := []string{}
+	sessionAgent, err := loadResolvedSessionAgent(session, projectKey)
+	if err != nil {
+		warnings = append(warnings, "loading session agent: "+err.Error())
+	}
+	agentName := ""
+	if sessionAgent != nil {
+		agentName = sessionAgent.AgentName
+	}
+	if agentName == "" && !allAgents {
+		warnings = append(warnings, "session has no Agent Mail identity; scoring all project reservations")
+		allAgents = true
+	}
+
+	var reservations []agentmail.FileReservation
+	agentMailUnavailable := false
+	agentMailErr := ""
+	client := newAgentMailClient(projectKey)
+	if !client.IsAvailable() {
+		agentMailUnavailable = true
+		agentMailErr = "Agent Mail server unavailable"
+		warnings = append(warnings, agentMailErr)
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		reservations, err = fetchActiveReservations(ctx, client, projectKey, agentName, allAgents)
+		if err != nil {
+			agentMailUnavailable = true
+			agentMailErr = err.Error()
+			warnings = append(warnings, "listing reservations: "+err.Error())
+		}
+	}
+
+	manager := worktrees.NewManager(projectKey, session)
+	worktreeList, err := manager.ListWorktrees()
+	if err != nil {
+		warnings = append(warnings, "listing worktrees: "+err.Error())
+	}
+
+	result := buildLocksAdviceResult(
+		session,
+		agentName,
+		projectKey,
+		reservations,
+		worktreeList,
+		warnings,
+		time.Now(),
+		agentMailUnavailable,
+		agentMailErr,
+	)
+
+	if IsJSONOutput() {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		if encErr := enc.Encode(result); encErr != nil {
+			return encErr
+		}
+		return nil
+	}
+
+	return printLocksAdviceResult(result)
+}
+
+func buildLocksAdviceResult(
+	session string,
+	agentName string,
+	projectKey string,
+	reservations []agentmail.FileReservation,
+	worktreeList []*worktrees.WorktreeInfo,
+	warnings []string,
+	now time.Time,
+	agentMailUnavailable bool,
+	agentMailErr string,
+) LocksAdviceResult {
+	reservationInputs := make([]reservationsim.ReservationRiskInput, 0, len(reservations))
+	for _, r := range reservations {
+		reservationInputs = append(reservationInputs, reservationsim.ReservationRiskInput{
+			ID:          r.ID,
+			PathPattern: r.PathPattern,
+			AgentName:   r.AgentName,
+			Exclusive:   r.Exclusive,
+			Reason:      r.Reason,
+			CreatedAt:   r.CreatedTS.Time,
+			ExpiresAt:   r.ExpiresTS.Time,
+		})
+	}
+
+	worktreeInputs := make([]worktrees.WorktreeRiskInput, 0, len(worktreeList))
+	for _, wt := range worktreeList {
+		worktreeInputs = append(worktreeInputs, worktrees.InspectRiskInput(wt, projectKey))
+	}
+
+	reservationReport := reservationsim.AdviseReservations(reservationInputs, reservationsim.ReservationAdvisorOptions{
+		Now:                  now,
+		AgentMailUnavailable: agentMailUnavailable,
+		AgentMailError:       agentMailErr,
+	})
+	worktreeReport := worktrees.AdviseWorktrees(worktreeInputs, worktrees.WorktreeAdvisorOptions{Now: now})
+
+	logRows := make([]LocksAdviceLogRow, 0, len(reservationReport.LogRows)+len(worktreeReport.LogRows))
+	for _, row := range reservationReport.LogRows {
+		logRows = append(logRows, LocksAdviceLogRow{
+			Source:        "reservation",
+			ReservationID: row.ReservationID,
+			PathPattern:   row.PathPattern,
+			Holder:        row.Holder,
+			WorktreePath:  row.WorktreePath,
+			RiskScore:     row.RiskScore,
+			Confidence:    row.Confidence,
+			Action:        row.Action,
+		})
+	}
+	for _, row := range worktreeReport.LogRows {
+		logRows = append(logRows, LocksAdviceLogRow{
+			Source:        "worktree",
+			ReservationID: row.ReservationID,
+			PathPattern:   row.PathPattern,
+			Holder:        row.Holder,
+			WorktreePath:  row.WorktreePath,
+			RiskScore:     row.RiskScore,
+			Confidence:    row.Confidence,
+			Action:        row.Action,
+		})
+	}
+	sortLocksAdviceLogRows(logRows)
+
+	return LocksAdviceResult{
+		Success:             true,
+		Session:             session,
+		Agent:               agentName,
+		ProjectKey:          projectKey,
+		Mode:                "proof",
+		AgentMailAvailable:  !agentMailUnavailable,
+		Warnings:            warnings,
+		Reservations:        reservationReport,
+		Worktrees:           worktreeReport,
+		LogRows:             logRows,
+		RecommendationCount: len(reservationReport.Recommendations) + len(worktreeReport.Recommendations),
+	}
+}
+
+func sortLocksAdviceLogRows(rows []LocksAdviceLogRow) {
+	sort.SliceStable(rows, func(i, j int) bool {
+		a, b := rows[i], rows[j]
+		if a.RiskScore != b.RiskScore {
+			return a.RiskScore > b.RiskScore
+		}
+		if a.Source != b.Source {
+			return a.Source < b.Source
+		}
+		if a.PathPattern != b.PathPattern {
+			return a.PathPattern < b.PathPattern
+		}
+		if a.WorktreePath != b.WorktreePath {
+			return a.WorktreePath < b.WorktreePath
+		}
+		return a.Holder < b.Holder
+	})
+}
+
+func printLocksAdviceResult(result LocksAdviceResult) error {
+	fmt.Printf("Reservation/worktree advisor (%s mode)\n", result.Mode)
+	fmt.Printf("Session: %s\n", result.Session)
+	fmt.Printf("Project: %s\n", result.ProjectKey)
+	if len(result.Warnings) > 0 {
+		fmt.Println("Warnings:")
+		for _, warning := range result.Warnings {
+			fmt.Printf("  - %s\n", warning)
+		}
+	}
+	if result.RecommendationCount == 0 {
+		fmt.Println("No reservation or worktree risks found.")
+		return nil
+	}
+	for _, row := range result.LogRows {
+		target := row.PathPattern
+		if target == "" {
+			target = row.WorktreePath
+		}
+		fmt.Printf("[%s] %s risk=%d confidence=%.2f action=%s holder=%s\n",
+			row.Source, target, row.RiskScore, row.Confidence, row.Action, row.Holder)
+	}
+	return nil
 }
 
 // LocksResult contains the list of active file reservations.
