@@ -1527,7 +1527,6 @@ func TestStartCheckpoint_DoesNotRacePastConcurrentStop(t *testing.T) {
 // StartCheckpoint that "lost" the map race leaks one goroutine that
 // keeps ticking until the test process exits.
 func TestStartCheckpoint_ConcurrentSameSessionDoesNotLeak(t *testing.T) {
-	t.Parallel()
 	tmpDir := t.TempDir()
 	persister, err := NewTimelinePersister(&TimelinePersistConfig{
 		BaseDir:            tmpDir,
