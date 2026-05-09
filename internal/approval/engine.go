@@ -335,18 +335,14 @@ func (e *Engine) WaitForApproval(ctx context.Context, id string, timeout time.Du
 	}
 	baseCtx := ctx
 
-	// First check current status
-	approval, err := e.Check(baseCtx, id)
-	if err != nil {
-		return nil, err
-	}
-
-	// If already decided, return immediately
-	if approval.Status != state.ApprovalPending {
-		return approval, nil
-	}
-
-	// Create a wait channel
+	// bd-e2qk2: register the wait channel BEFORE checking status, then
+	// re-check. If a pre-fix WaitForApproval did Check-first then
+	// register, an Approve() racing between Check and register would
+	// notify the waiter list while this waiter's channel wasn't yet
+	// in it — the decision was lost and the caller blocked for the
+	// full timeout despite a decision having been made. With register-
+	// then-check, either (a) the second Check sees the decision, or
+	// (b) any future decision arrives via the now-registered channel.
 	waitCh := make(chan struct{}, 1)
 	e.waitersMu.Lock()
 	e.waiters[id] = append(e.waiters[id], waitCh)
@@ -364,6 +360,15 @@ func (e *Engine) WaitForApproval(ctx context.Context, id string, timeout time.Du
 		}
 		e.waitersMu.Unlock()
 	}()
+
+	// Check current status AFTER registering — closes the race window.
+	approval, err := e.Check(baseCtx, id)
+	if err != nil {
+		return nil, err
+	}
+	if approval.Status != state.ApprovalPending {
+		return approval, nil
+	}
 
 	waitCtx, cancel := context.WithTimeout(baseCtx, timeout)
 	defer cancel()

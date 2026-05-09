@@ -423,6 +423,69 @@ func TestWaitForApprovalTimeout(t *testing.T) {
 	}
 }
 
+// bd-e2qk2: pre-fix, WaitForApproval did Check-then-register. If
+// Approve() ran between the Check and the register-waitCh step, the
+// waiter missed the notification (its channel wasn't yet in the
+// e.waiters[id] slice when notifyWaiters fired) and the caller blocked
+// for the full timeout — even though the decision had already been
+// made. The fix is register-then-Check: register the waitCh first,
+// then re-check status; either the second Check sees the decision or
+// any future decision arrives via the registered channel.
+//
+// This test races Approve() against WaitForApproval with no artificial
+// delay, then asserts the call returns well within timeout (waitCh
+// unblocked OR second Check caught the decision). The test runs many
+// iterations to flush out the race window pre-fix.
+func TestWaitForApproval_NoRaceWithApproveBetweenCheckAndRegister(t *testing.T) {
+	store := setupTestStore(t)
+	engine := New(store, nil, nil, DefaultConfig())
+	ctx := context.Background()
+
+	const iterations = 200
+	const waitTimeout = 200 * time.Millisecond
+	// Acceptable upper bound on per-iteration wait. Pre-fix, when the
+	// race triggers, elapsed approaches waitTimeout (200ms). Post-fix,
+	// the second Check catches the decision so elapsed stays in the
+	// few-ms range. Set the threshold well below waitTimeout so a
+	// single pre-fix race-trigger fails the test cleanly.
+	const acceptable = 50 * time.Millisecond
+
+	for i := 0; i < iterations; i++ {
+		approval, err := engine.Request(ctx, RequestParams{
+			Action:      "race_action",
+			Resource:    "race_resource",
+			RequestedBy: "requester",
+		})
+		if err != nil {
+			t.Fatalf("iter %d Request: %v", i, err)
+		}
+
+		// Race: approve immediately, no delay. Half the time this fires
+		// before WaitForApproval registers the waitCh; the fix makes
+		// the second Check catch the decision.
+		go func(id string) {
+			_ = engine.Approve(ctx, id, "approver")
+		}(approval.ID)
+
+		start := time.Now()
+		result, err := engine.WaitForApproval(ctx, approval.ID, waitTimeout)
+		elapsed := time.Since(start)
+		if err != nil {
+			t.Fatalf("iter %d WaitForApproval: %v", i, err)
+		}
+		if result.Status != state.ApprovalApproved {
+			t.Errorf("iter %d: status = %s, want approved", i, result.Status)
+		}
+		// Pre-fix: when the race triggered, this would equal waitTimeout.
+		// Post-fix: always returns promptly because the second Check
+		// catches the just-made decision.
+		if elapsed > acceptable {
+			t.Errorf("iter %d: WaitForApproval took %v, want < %v (race not closed?)",
+				i, elapsed, acceptable)
+		}
+	}
+}
+
 func TestEventEmission(t *testing.T) {
 	store := setupTestStore(t)
 	eventBus := events.NewEventBus(100)
