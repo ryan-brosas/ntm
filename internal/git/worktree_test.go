@@ -77,6 +77,8 @@ func TestCanonicalSessionKey(t *testing.T) {
 		{"empty falls back", "", "session", ""},
 		{"preserves identity-bearing suffix", "alpha-team-claude-12", "alpha-team-claude-12", ""},
 		{"preserves repeated safe separators", "alpha--team-claude-1", "alpha--team-claude-1", ""},
+		{"normalizes leading dot for git-ref safety", ".alpha--team-claude-1", "alpha--team-claude-1", ""},
+		{"normalizes trailing dot for git-ref safety", "alpha--team-claude-1.", "alpha--team-claude-1", ""},
 		{"normalizes disallowed characters", "alpha team/claude:12", "alpha-team-claude-12", ""},
 		{"collapses repeated separators", "alpha---team***claude", "alpha-team-claude", ""},
 		{"distinct pane IDs remain distinct", "alpha-team-claude-1", "alpha-team-claude-1", "alpha-team-claude-2"},
@@ -326,6 +328,27 @@ func TestWorktreeManager_parseWorktreeList_IgnoresAgentTextInParentPath(t *testi
 	}
 	if len(worktrees) != 0 {
 		t.Fatalf("expected parent path containing agent- to be ignored, got %d worktrees", len(worktrees))
+	}
+}
+
+func TestWorktreeManager_parseWorktreeList_ExcludesPrimaryCheckoutOnAgentBranch(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	repoPath := filepath.Join(tmp, "repo")
+	if err := os.MkdirAll(repoPath, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	wm := &WorktreeManager{baseRepo: repoPath}
+	output := fmt.Sprintf("worktree %s\nHEAD abc123\nbranch refs/heads/agent/evil-type/sess-one\n", repoPath)
+
+	worktrees, err := wm.parseWorktreeList(output)
+	if err != nil {
+		t.Fatalf("parseWorktreeList: %v", err)
+	}
+	if len(worktrees) != 0 {
+		t.Fatalf("expected primary checkout path to be excluded, got %d worktrees", len(worktrees))
 	}
 }
 

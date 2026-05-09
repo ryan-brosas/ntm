@@ -2,6 +2,7 @@
 package git
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
@@ -14,6 +15,11 @@ import (
 
 func isAlreadySafeWorktreeKey(value string) bool {
 	if value == "" || value == "." || value == ".." {
+		return false
+	}
+	// Even if characters are otherwise safe, leading/trailing dots are
+	// invalid in git ref components. Keep those on the canonicalization path.
+	if strings.HasPrefix(value, ".") || strings.HasSuffix(value, ".") {
 		return false
 	}
 	for _, r := range value {
@@ -79,6 +85,13 @@ func canonicalSessionKey(sessionID string) string {
 	// through dash-collapsing canonicalization (bd-iz9ss).
 	if isAlreadySafeWorktreeKey(sessionID) {
 		return sessionID
+	}
+	// Keep the no-aliasing behavior for otherwise-safe IDs that only violate
+	// git-ref component rules at the edges (for example ".foo."), by trimming
+	// edge dots without re-running dash-collapse logic.
+	trimmedDots := strings.Trim(sessionID, ".")
+	if trimmedDots != sessionID && isAlreadySafeWorktreeKey(trimmedDots) {
+		return trimmedDots
 	}
 	return canonicalWorktreeKey(sessionID, "session")
 }
@@ -417,7 +430,13 @@ func (wm *WorktreeManager) parseWorktreeList(output string) ([]*WorktreeInfo, er
 		// Only include agent worktrees. A parent directory may contain the
 		// string "agent-", so match the branch or the worktree basename
 		// instead of the full path.
-		if path != "" {
+		if len(path) > 0 {
+			// git worktree list includes the primary checkout. Even if that
+			// checkout is currently on an agent/* branch, it is not an agent
+			// worktree entry and must be excluded from agent listings.
+			if len(wm.baseRepo) > 0 && bytes.Equal([]byte(filepath.Clean(path)), []byte(filepath.Clean(wm.baseRepo))) {
+				continue
+			}
 			basename := filepath.Base(path)
 			agentName := parseBranchAgentKey(branch)
 			if agentName == "" && !strings.HasPrefix(basename, "agent-") {
