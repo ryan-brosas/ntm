@@ -167,7 +167,7 @@ func TestEvaluateOverlapAdjacentFollowUpAndNovel(t *testing.T) {
 
 func TestKnownClosedIdeaWizardFamilies(t *testing.T) {
 	got := KnownClosedIdeaWizardFamilies()
-	for _, want := range []string{"bd-2mb03", "bd-3v1gs", "bd-fxj4f", "bd-8kglp"} {
+	for _, want := range []string{"bd-2mb03", "bd-3v1gs", "bd-fxj4f", "bd-8kglp", "bd-e7xm1"} {
 		if !containsString(got, want) {
 			t.Fatalf("families=%v, want %s", got, want)
 		}

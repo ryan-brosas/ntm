@@ -71,7 +71,7 @@ func (collector Collector) CollectBR(ctx context.Context, snapshot *IdeaEvidence
 	ready := collector.collectBRIssues(ctx, opts, "br:ready", "ready", []string{"ready", "--json", "--no-auto-flush", "--no-auto-import"})
 	open := collector.collectBRIssues(ctx, opts, "br:open", "open", []string{"list", "--status", "open", "--limit", "0", "--json", "--no-auto-flush", "--no-auto-import"})
 	inProgress := collector.collectBRIssues(ctx, opts, "br:in_progress", "in_progress", []string{"list", "--status", "in_progress", "--limit", "0", "--json", "--no-auto-flush", "--no-auto-import"})
-	closed := collector.collectBRIssues(ctx, opts, "br:closed", "closed", []string{"list", "--status", "closed", "--all", "--limit", strconv.Itoa(opts.RecentClosedLimit), "--sort", "updated_at", "--reverse", "--json", "--no-auto-flush", "--no-auto-import"})
+	closed := collector.collectBRIssues(ctx, opts, "br:closed", "closed", []string{"list", "--status", "closed", "--all", "--limit", strconv.Itoa(opts.RecentClosedLimit), "--sort", "updated_at", "--json", "--no-auto-flush", "--no-auto-import"})
 
 	for _, group := range []struct {
 		sourceID string

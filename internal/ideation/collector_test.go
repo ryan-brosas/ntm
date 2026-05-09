@@ -18,10 +18,10 @@ func TestCollectLocalEvidenceSuccess(t *testing.T) {
 	mustWriteCollectorFile(t, filepath.Join(dir, "tests", "artifacts", "closeout-proof.md"), []byte("proof"))
 
 	runner := fakeRunner{outputs: map[string][]byte{
-		"br ready --json --no-auto-flush --no-auto-import":                                                             []byte(`[{"id":"bd-ready","title":"Ready","status":"open","priority":1,"issue_type":"task","labels":["queue-dry"],"updated_at":"2026-05-09T00:00:00Z"}]`),
-		"br list --status open --limit 0 --json --no-auto-flush --no-auto-import":                                      []byte(`[{"id":"bd-open","title":"Open","status":"open","priority":2,"issue_type":"task","labels":["ops"]}]`),
-		"br list --status in_progress --limit 0 --json --no-auto-flush --no-auto-import":                               []byte(`[{"id":"bd-progress","title":"Progress","status":"in_progress","priority":1,"issue_type":"task","labels":["ops"]}]`),
-		"br list --status closed --all --limit 80 --sort updated_at --reverse --json --no-auto-flush --no-auto-import": []byte(`[{"id":"bd-2mb03.5","title":"Queue dry operator autopilot","description":"closed family","status":"closed","priority":1,"issue_type":"task","labels":["queue-dry"],"closed_at":"2026-05-08T00:00:00Z"}]`),
+		"br ready --json --no-auto-flush --no-auto-import":                                                   []byte(`[{"id":"bd-ready","title":"Ready","status":"open","priority":1,"issue_type":"task","labels":["queue-dry"],"updated_at":"2026-05-09T00:00:00Z"}]`),
+		"br list --status open --limit 0 --json --no-auto-flush --no-auto-import":                            []byte(`[{"id":"bd-open","title":"Open","status":"open","priority":2,"issue_type":"task","labels":["ops"]}]`),
+		"br list --status in_progress --limit 0 --json --no-auto-flush --no-auto-import":                     []byte(`[{"id":"bd-progress","title":"Progress","status":"in_progress","priority":1,"issue_type":"task","labels":["ops"]}]`),
+		"br list --status closed --all --limit 80 --sort updated_at --json --no-auto-flush --no-auto-import": []byte(`[{"id":"bd-2mb03.5","title":"Queue dry operator autopilot","description":"closed family","status":"closed","priority":1,"issue_type":"task","labels":["queue-dry"],"closed_at":"2026-05-08T00:00:00Z"}]`),
 		"bv --robot-triage": []byte(`{"triage":{"quick_ref":{"open_count":3,"actionable_count":1,"blocked_count":1,"in_progress_count":1,"top_picks":[{"id":"bd-ready"}]},"recommendations":[],"project_health":{"graph":{"node_count":3,"edge_count":2,"density":0.5,"has_cycles":false,"phase2_ready":true}}}}`),
 		"git log -n 8 --name-only --pretty=format:__NTM_COMMIT__%x00%H%x00%s": []byte("__NTM_COMMIT__\x00abc123\x00subject one\ninternal/a.go\ninternal/b.go\n"),
 	}}
@@ -44,6 +44,44 @@ func TestCollectLocalEvidenceSuccess(t *testing.T) {
 	}
 	if len(snapshot.DegradedSources) != 0 {
 		t.Fatalf("degraded sources=%+v, want none", snapshot.DegradedSources)
+	}
+}
+
+func TestCollectBRUsesNewestClosedWorkForOverlap(t *testing.T) {
+	runner := fakeRunner{outputs: map[string][]byte{
+		"br ready --json --no-auto-flush --no-auto-import":                               []byte(`[]`),
+		"br list --status open --limit 0 --json --no-auto-flush --no-auto-import":        []byte(`[]`),
+		"br list --status in_progress --limit 0 --json --no-auto-flush --no-auto-import": []byte(`[]`),
+		"br list --status closed --all --limit 80 --sort updated_at --json --no-auto-flush --no-auto-import": []byte(`[{
+			"id":"bd-e7xm1",
+			"title":"Idea Wizard: queue-dry ideation pipeline vNext",
+			"description":"duplicate-aware ranking, dry-run roadmap rendering, novelty guard, gated bead creation, docs, and effectiveness feedback loop are complete",
+			"status":"closed",
+			"priority":4,
+			"issue_type":"epic",
+			"labels":["idea-wizard","planning","queue-dry"],
+			"updated_at":"2026-05-09T14:14:01Z",
+			"closed_at":"2026-05-09T14:14:01Z"
+		}]`),
+	}}
+	snapshot := NewIdeaEvidenceSnapshot(t.TempDir())
+	Collector{Runner: runner}.CollectBR(context.Background(), &snapshot, CollectorOptions{ProjectDir: snapshot.Project})
+	if !hasExistingWork(snapshot.ExistingWork, "bd-e7xm1", "bd-e7xm1") {
+		t.Fatalf("existing work missing newest closed queue-dry family: %+v", snapshot.ExistingWork)
+	}
+
+	result := RankCandidates(snapshot, DefaultRankOptions())
+	if len(result.Selected) != 0 {
+		t.Fatalf("selected=%v, want generated queue-dry plan suppressed after bd-e7xm1 closeout", result.Selected)
+	}
+	if result.Decision != RankingDecisionReviewRecentWork {
+		t.Fatalf("decision=%q, want review_recent_work", result.Decision)
+	}
+	if len(result.Suppressed) != 1 || result.Suppressed[0].Candidate.ID != "generated-queue-dry-plan" {
+		t.Fatalf("suppressed=%v, want generated queue-dry plan", result.Suppressed)
+	}
+	if result.Suppressed[0].Candidate.Overlap.FamilyID != "bd-e7xm1" {
+		t.Fatalf("suppressed family=%q, want bd-e7xm1", result.Suppressed[0].Candidate.Overlap.FamilyID)
 	}
 }
 
