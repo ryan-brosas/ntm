@@ -384,6 +384,24 @@ func TestJobQueue_ListBySession(t *testing.T) {
 	}
 }
 
+func TestJobQueue_ListBySession_UsesSnapshottedFieldsOnSamePointerMutation(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	j := NewSpawnJob("j1", JobTypeSession, "alpha")
+	q.Enqueue(j)
+	j.SessionName = "mutated-session"
+
+	alphaJobs := q.ListBySession("alpha")
+	if len(alphaJobs) != 1 || alphaJobs[0].ID != "j1" {
+		t.Fatalf("ListBySession('alpha') = %v, want [j1] from snapshotted index fields", alphaJobs)
+	}
+	mutatedJobs := q.ListBySession("mutated-session")
+	if len(mutatedJobs) != 0 {
+		t.Fatalf("ListBySession('mutated-session') = %d, want 0", len(mutatedJobs))
+	}
+}
+
 func TestJobQueue_ListByBatch(t *testing.T) {
 	t.Parallel()
 	q := NewJobQueue()
@@ -407,6 +425,25 @@ func TestJobQueue_ListByBatch(t *testing.T) {
 	bJobs := q.ListByBatch("batch-B")
 	if len(bJobs) != 1 {
 		t.Errorf("ListByBatch('batch-B') = %d, want 1", len(bJobs))
+	}
+}
+
+func TestJobQueue_ListByBatch_UsesSnapshottedFieldsOnSamePointerMutation(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	j := NewSpawnJob("j1", JobTypeSession, "s")
+	j.BatchID = "batch-A"
+	q.Enqueue(j)
+	j.BatchID = "mutated-batch"
+
+	aJobs := q.ListByBatch("batch-A")
+	if len(aJobs) != 1 || aJobs[0].ID != "j1" {
+		t.Fatalf("ListByBatch('batch-A') = %v, want [j1] from snapshotted index fields", aJobs)
+	}
+	mutatedJobs := q.ListByBatch("mutated-batch")
+	if len(mutatedJobs) != 0 {
+		t.Fatalf("ListByBatch('mutated-batch') = %d, want 0", len(mutatedJobs))
 	}
 }
 

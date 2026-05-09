@@ -357,7 +357,14 @@ func (q *JobQueue) ListBySession(sessionName string) []*SpawnJob {
 
 	var result []*SpawnJob
 	for _, job := range q.jobs {
-		if job.SessionName == sessionName {
+		fields, ok := q.jobIndexByID[job.ID]
+		if !ok {
+			fields = snapshotJobIndexFields(job)
+		}
+		// Keep list semantics aligned with Count*/Cancel* accounting:
+		// use the queue's snapshotted index fields rather than mutable
+		// live pointer fields.
+		if fields.SessionName == sessionName {
 			result = append(result, job)
 		}
 	}
@@ -371,7 +378,14 @@ func (q *JobQueue) ListByBatch(batchID string) []*SpawnJob {
 
 	var result []*SpawnJob
 	for _, job := range q.jobs {
-		if job.BatchID == batchID {
+		fields, ok := q.jobIndexByID[job.ID]
+		if !ok {
+			fields = snapshotJobIndexFields(job)
+		}
+		// Keep list semantics aligned with Count*/Cancel* accounting:
+		// use the queue's snapshotted index fields rather than mutable
+		// live pointer fields.
+		if fields.BatchID == batchID {
 			result = append(result, job)
 		}
 	}
