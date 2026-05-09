@@ -18,6 +18,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agentmail"
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/commitlint"
+	ideaplan "github.com/Dicklesworthstone/ntm/internal/ideation"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/robot/assurance"
 	"github.com/Dicklesworthstone/ntm/internal/tools"
@@ -244,6 +245,9 @@ func newWorkQueueDryCmd() *cobra.Command {
 		commitLimit     int
 		syncLagMinutes  int
 		maxStaleEntries int
+		ideate          bool
+		force           bool
+		includeNextBest bool
 	)
 
 	cmd := &cobra.Command{
@@ -256,17 +260,26 @@ This command is advisory-only. It does not claim, reopen, or create beads automa
 Examples:
   ntm work queue-dry
   ntm work queue-dry --format=json
+  ntm work queue-dry --ideate --format=markdown
+  ntm work queue-dry --ideate --force --format=json
   ntm work queue-dry --stale-hours=24 --commits=5`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWorkQueueDry(format, staleHours, commitLimit, syncLagMinutes, maxStaleEntries)
+			return runWorkQueueDry(format, staleHours, commitLimit, syncLagMinutes, maxStaleEntries, QueueDryIdeationOptions{
+				Requested:       ideate,
+				Force:           force,
+				IncludeNextBest: includeNextBest,
+			})
 		},
 	}
 
-	cmd.Flags().StringVar(&format, "format", "", "Output format: text or json")
+	cmd.Flags().StringVar(&format, "format", "", "Output format: text, json, or markdown")
 	cmd.Flags().IntVar(&staleHours, "stale-hours", 24, "Mark in_progress beads older than this many hours as stale")
 	cmd.Flags().IntVar(&commitLimit, "commits", 5, "Number of recent commits to include in evidence")
 	cmd.Flags().IntVar(&syncLagMinutes, "sync-lag-minutes", 10, "Allowable mtime lag between .beads/beads.db and .beads/issues.jsonl")
 	cmd.Flags().IntVar(&maxStaleEntries, "max-stale", 10, "Maximum stale in_progress beads to include")
+	cmd.Flags().BoolVar(&ideate, "ideate", false, "Render duplicate-aware queue-dry ideation as a dry-run roadmap")
+	cmd.Flags().BoolVar(&force, "force", false, "Preview ideation even when ready work exists or queue state is unverified")
+	cmd.Flags().BoolVar(&includeNextBest, "include-next-best", false, "Include next-best candidates after the top five in the dry-run roadmap")
 
 	return cmd
 }
@@ -822,10 +835,33 @@ type QueueDryResponse struct {
 	QueueDry        bool                           `json:"queue_dry"`
 	Evidence        QueueDryEvidence               `json:"evidence"`
 	Quiescence      assurance.QuiescenceAssessment `json:"quiescence"`
+	Ideation        *QueueDryIdeationReport        `json:"ideation,omitempty"`
 	Recommendations []QueueDryRecommendation       `json:"recommendations"`
 	Recipes         []QueueDryRecipe               `json:"recipes"`
 	Warnings        []string                       `json:"warnings,omitempty"`
 	Errors          []string                       `json:"errors,omitempty"`
+}
+
+// QueueDryIdeationOptions controls the advisory ideation dry-run path.
+type QueueDryIdeationOptions struct {
+	Requested       bool
+	Force           bool
+	IncludeNextBest bool
+}
+
+// QueueDryIdeationReport embeds the bd-e7xm1 dry-run planning pipeline in queue-dry output.
+type QueueDryIdeationReport struct {
+	Requested   bool                             `json:"requested"`
+	DryRun      bool                             `json:"dry_run"`
+	Forced      bool                             `json:"forced,omitempty"`
+	Status      string                           `json:"status"`
+	Reason      string                           `json:"reason"`
+	Snapshot    *ideaplan.IdeaEvidenceSnapshot   `json:"snapshot,omitempty"`
+	Ranking     *ideaplan.RankingResult          `json:"ranking,omitempty"`
+	Guard       *ideaplan.NoveltyGuardAssessment `json:"guard,omitempty"`
+	Roadmap     *ideaplan.RoadmapPlan            `json:"roadmap,omitempty"`
+	NextActions []QueueDryRecommendation         `json:"next_actions"`
+	Warnings    []string                         `json:"warnings,omitempty"`
 }
 
 // QueueDryEvidence stores collected evidence for queue-dry analysis.
@@ -1232,7 +1268,7 @@ func appendCommitReadyStatus(report *CommitReadyResponse, finding commitlint.Fin
 
 func commitReadyHasFindingCode(findings []commitlint.Finding, code string) bool {
 	for _, finding := range findings {
-		if finding.Code == code {
+		if strings.Compare(finding.Code, code) == 0 {
 			return true
 		}
 	}
@@ -1277,7 +1313,7 @@ func normalizeCommitReadyPath(value string) string {
 	return strings.Trim(value, "/")
 }
 
-func runWorkQueueDry(format string, staleHours, commitLimit, syncLagMinutes, maxStaleEntries int) error {
+func runWorkQueueDry(format string, staleHours, commitLimit, syncLagMinutes, maxStaleEntries int, ideationOpts QueueDryIdeationOptions) error {
 	dir, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("getting working directory: %w", err)
@@ -1297,6 +1333,11 @@ func runWorkQueueDry(format string, staleHours, commitLimit, syncLagMinutes, max
 	}
 
 	report := collectQueueDryReport(dir, time.Now().UTC(), time.Duration(staleHours)*time.Hour, commitLimit, time.Duration(syncLagMinutes)*time.Minute, maxStaleEntries)
+	if ideationOpts.Requested {
+		ideationReport := collectQueueDryIdeationReport(dir, report, ideationOpts)
+		report.Ideation = &ideationReport
+	}
+
 	outputMode := strings.ToLower(strings.TrimSpace(format))
 	if outputMode == "" && jsonOutput {
 		outputMode = "json"
@@ -1304,7 +1345,186 @@ func runWorkQueueDry(format string, staleHours, commitLimit, syncLagMinutes, max
 	if outputMode == "json" {
 		return outputJSON(report)
 	}
+	if outputMode == "markdown" || outputMode == "md" {
+		return renderQueueDryMarkdown(report)
+	}
 	return renderQueueDry(report)
+}
+
+func collectQueueDryIdeationReport(dir string, report QueueDryResponse, opts QueueDryIdeationOptions) QueueDryIdeationReport {
+	if !opts.Force && !report.QueueDry {
+		return skippedQueueDryIdeationReport(report, opts)
+	}
+
+	snapshot := ideaplan.CollectLocalEvidence(context.Background(), ideaplan.CollectorOptions{
+		ProjectDir: dir,
+	})
+	annotateQueueDryOptionalSources(&snapshot, report)
+	return buildQueueDryIdeationReport(report, snapshot, opts)
+}
+
+func skippedQueueDryIdeationReport(report QueueDryResponse, opts QueueDryIdeationOptions) QueueDryIdeationReport {
+	status := "skipped_unverified_queue"
+	reason := "queue state is unverified; use --force only if a human explicitly wants an ideation preview"
+	if report.Evidence.CountsVerified {
+		status = "skipped_ready_work"
+		reason = "ready or actionable work exists; work that queue before ideating, or pass --force for a preview"
+	}
+	return QueueDryIdeationReport{
+		Requested:   true,
+		DryRun:      true,
+		Forced:      opts.Force,
+		Status:      status,
+		Reason:      reason,
+		NextActions: append([]QueueDryRecommendation(nil), report.Recommendations...),
+		Warnings:    sortedUniqueStrings(report.Warnings),
+	}
+}
+
+func annotateQueueDryOptionalSources(snapshot *ideaplan.IdeaEvidenceSnapshot, report QueueDryResponse) {
+	if snapshot == nil {
+		return
+	}
+	agentMail := ideaplan.CandidateSource{
+		ID:        "agent_mail:reservations",
+		Kind:      ideaplan.SourceAgentMail,
+		Available: report.Evidence.Reservations.Available,
+		Required:  false,
+		Evidence:  []string{"Agent Mail reservation visibility for queue-dry ideation"},
+	}
+	if !agentMail.Available {
+		agentMail.Error = strings.TrimSpace(report.Evidence.Reservations.Error)
+		if agentMail.Error == "" {
+			agentMail.Error = "Agent Mail server unavailable"
+		}
+	}
+	snapshot.RecordSource(agentMail)
+
+	for _, source := range []ideaplan.CandidateSource{
+		{
+			ID:        "cass:context",
+			Kind:      ideaplan.SourceCASS,
+			Available: false,
+			Required:  false,
+			Error:     "optional CASS adapter unavailable in queue-dry CLI dry run",
+			Evidence:  []string{"bd-e7xm1.6 tracks bounded CASS adapter integration"},
+		},
+		{
+			ID:        "cm:context",
+			Kind:      ideaplan.SourceCM,
+			Available: false,
+			Required:  false,
+			Error:     "optional CM adapter unavailable in queue-dry CLI dry run",
+			Evidence:  []string{"bd-e7xm1.6 tracks bounded CM adapter integration"},
+		},
+	} {
+		snapshot.RecordSource(source)
+	}
+}
+
+func buildQueueDryIdeationReport(report QueueDryResponse, snapshot ideaplan.IdeaEvidenceSnapshot, opts QueueDryIdeationOptions) QueueDryIdeationReport {
+	ranking := ideaplan.RankCandidates(snapshot, ideaplan.DefaultRankOptions())
+	guard := ideaplan.AssessNoveltyGuard(snapshot, ranking, ideaplan.NoveltyGuardOptions{
+		ReservationStateUnknown: !report.Evidence.Reservations.Available,
+		ActiveReservationCount:  report.Evidence.Reservations.Count,
+		StaleInProgressIDs:      queueDryStaleIDs(report.Evidence.StaleInProgress),
+	})
+	roadmap := ideaplan.RenderRoadmap(ranking, ideaplan.RoadmapRenderOptions{
+		PlanID:          "queue-dry-ideation-dry-run",
+		ParentID:        "bd-e7xm1",
+		IncludeNextBest: opts.IncludeNextBest,
+		VerificationCommands: []string{
+			"gofmt -l <touched-go-files>",
+			"goimports -l <touched-go-files>",
+			"rch exec -- go test -short ./internal/ideation/...",
+			"rch exec -- go test -short ./internal/cli/...",
+			"git diff --check",
+		},
+		NonGoals: []string{
+			"do not mutate Beads during dry-run rendering",
+			"do not require network, real agents, or model calls",
+			"do not add a new top-level robot surface for queue-dry planning",
+		},
+	})
+
+	status := "rendered"
+	reason := "queue is dry; rendered duplicate-aware dry-run roadmap"
+	if opts.Force && !report.QueueDry {
+		status = "forced_preview"
+		reason = "force requested; rendered dry-run roadmap even though ready work or unverified tracker state exists"
+	}
+
+	return QueueDryIdeationReport{
+		Requested:   true,
+		DryRun:      true,
+		Forced:      opts.Force,
+		Status:      status,
+		Reason:      reason,
+		Snapshot:    &snapshot,
+		Ranking:     &ranking,
+		Guard:       &guard,
+		Roadmap:     &roadmap,
+		NextActions: queueDryIdeationNextActions(report, guard, roadmap),
+		Warnings:    queueDryIdeationWarnings(snapshot, report),
+	}
+}
+
+func queueDryStaleIDs(items []QueueDryStaleIssue) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item.ID != "" {
+			ids = append(ids, item.ID)
+		}
+	}
+	return sortedUniqueStrings(ids)
+}
+
+func queueDryIdeationWarnings(snapshot ideaplan.IdeaEvidenceSnapshot, report QueueDryResponse) []string {
+	warnings := append([]string{}, report.Warnings...)
+	for _, note := range snapshot.DegradedSources {
+		message := strings.TrimSpace(note.Message)
+		if message == "" {
+			message = "source unavailable"
+		}
+		if note.SourceID != "" {
+			message = note.SourceID + ": " + message
+		}
+		warnings = append(warnings, message)
+	}
+	return sortedUniqueStrings(warnings)
+}
+
+func queueDryIdeationNextActions(report QueueDryResponse, guard ideaplan.NoveltyGuardAssessment, roadmap ideaplan.RoadmapPlan) []QueueDryRecommendation {
+	actions := make([]QueueDryRecommendation, 0, len(report.Recommendations)+2)
+	if guard.Recommendation != ideaplan.GuardRecommendationIdeate {
+		actions = append(actions, QueueDryRecommendation{
+			Code:     "respect_novelty_guard",
+			Summary:  "novelty guard recommends " + string(guard.Recommendation) + " before mutating beads",
+			Command:  commandForGuardRecommendation(guard.Recommendation),
+			Evidence: strings.Join(guard.ReasonCodes, ", "),
+		})
+	}
+	if roadmap.RenderedCount > 0 {
+		actions = append(actions, QueueDryRecommendation{
+			Code:     "inspect_dry_run_bead_preview",
+			Summary:  "inspect proposed bead previews; commands are dry-run only",
+			Evidence: fmt.Sprintf("%d proposed bead command(s)", roadmap.RenderedCount),
+		})
+	}
+	return append(actions, report.Recommendations...)
+}
+
+func commandForGuardRecommendation(rec ideaplan.GuardRecommendation) string {
+	switch rec {
+	case ideaplan.GuardRecommendationReviewRecentWork:
+		return "ntm review-queue <session>"
+	case ideaplan.GuardRecommendationValidateCloseout:
+		return "ntm work alerts --critical-only"
+	case ideaplan.GuardRecommendationWaitForCoordination:
+		return "ntm work commit-ready --format=json"
+	default:
+		return ""
+	}
 }
 
 func collectQueueDryReport(dir string, now time.Time, staleThreshold time.Duration, commitLimit int, syncLagThreshold time.Duration, staleLimit int) QueueDryResponse {
@@ -1815,6 +2035,25 @@ func renderQueueDry(report QueueDryResponse) error {
 		}
 	}
 
+	if report.Ideation != nil {
+		fmt.Println()
+		fmt.Println(titleStyle.Render("Ideation Dry Run:"))
+		fmt.Printf("  Status: %s\n", report.Ideation.Status)
+		fmt.Printf("  Reason: %s\n", report.Ideation.Reason)
+		if report.Ideation.Guard != nil {
+			fmt.Printf("  Guard: %s (creation_allowed=%t)\n", report.Ideation.Guard.Recommendation, report.Ideation.Guard.CreationAllowed)
+			if len(report.Ideation.Guard.ReasonCodes) > 0 {
+				fmt.Printf("    Reasons: %s\n", strings.Join(report.Ideation.Guard.ReasonCodes, ", "))
+			}
+		}
+		if report.Ideation.Roadmap != nil {
+			fmt.Printf("  Proposed beads: %d\n", report.Ideation.Roadmap.RenderedCount)
+			for _, command := range report.Ideation.Roadmap.CommandPreview {
+				fmt.Printf("    %s %s\n", mutedStyle.Render("Preview:"), command)
+			}
+		}
+	}
+
 	if len(report.Warnings) > 0 {
 		fmt.Println()
 		fmt.Println(warnStyle.Render("Warnings:"))
@@ -1849,6 +2088,97 @@ func renderQueueDry(report QueueDryResponse) error {
 
 	fmt.Println()
 	return nil
+}
+
+func renderQueueDryMarkdown(report QueueDryResponse) error {
+	fmt.Print(queueDryMarkdown(report))
+	return nil
+}
+
+func queueDryMarkdown(report QueueDryResponse) string {
+	var b strings.Builder
+	b.WriteString("# Queue-Dry Diagnostic\n\n")
+	fmt.Fprintf(&b, "- Project: `%s`\n", report.Project)
+	fmt.Fprintf(&b, "- Queue dry: %t\n", report.QueueDry)
+	fmt.Fprintf(&b, "- Counts verified: %t\n", report.Evidence.CountsVerified)
+	fmt.Fprintf(&b, "- Open: %d\n", report.Evidence.OpenCount)
+	fmt.Fprintf(&b, "- Ready: %d\n", report.Evidence.ReadyCount)
+	fmt.Fprintf(&b, "- Actionable: %d\n", report.Evidence.ActionableCount)
+	fmt.Fprintf(&b, "- Blocked: %d\n", report.Evidence.BlockedCount)
+	fmt.Fprintf(&b, "- In progress: %d\n", report.Evidence.InProgressCount)
+	if report.Quiescence.State != "" {
+		fmt.Fprintf(&b, "- Quiescence: `%s` (safe_to_stand_down=%t)\n", report.Quiescence.State, report.Quiescence.SafeToStandDown)
+	}
+	if len(report.Recommendations) > 0 {
+		b.WriteString("\n## Recommended Next Steps\n")
+		for _, rec := range report.Recommendations {
+			fmt.Fprintf(&b, "\n- `%s`: %s\n", rec.Code, rec.Summary)
+			if rec.Command != "" {
+				fmt.Fprintf(&b, "  - Command: `%s`\n", rec.Command)
+			}
+			if rec.Evidence != "" {
+				fmt.Fprintf(&b, "  - Evidence: %s\n", rec.Evidence)
+			}
+		}
+	}
+	if report.Ideation != nil {
+		b.WriteString("\n")
+		b.WriteString(queueDryIdeationMarkdown(*report.Ideation))
+	}
+	if len(report.Warnings) > 0 {
+		b.WriteString("\n## Warnings\n")
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(&b, "\n- %s\n", warning)
+		}
+	}
+	if len(report.Errors) > 0 {
+		b.WriteString("\n## Errors\n")
+		for _, err := range report.Errors {
+			fmt.Fprintf(&b, "\n- %s\n", err)
+		}
+	}
+	return b.String()
+}
+
+func queueDryIdeationMarkdown(report QueueDryIdeationReport) string {
+	var b strings.Builder
+	b.WriteString("# Queue-Dry Ideation Dry Run\n\n")
+	fmt.Fprintf(&b, "- Dry run: %t\n", report.DryRun)
+	fmt.Fprintf(&b, "- Status: `%s`\n", report.Status)
+	fmt.Fprintf(&b, "- Forced: %t\n", report.Forced)
+	if report.Reason != "" {
+		fmt.Fprintf(&b, "- Reason: %s\n", report.Reason)
+	}
+	if report.Guard != nil {
+		fmt.Fprintf(&b, "- Guard recommendation: `%s`\n", report.Guard.Recommendation)
+		fmt.Fprintf(&b, "- Creation allowed: %t\n", report.Guard.CreationAllowed)
+		if len(report.Guard.ReasonCodes) > 0 {
+			fmt.Fprintf(&b, "- Guard reasons: %s\n", strings.Join(report.Guard.ReasonCodes, ", "))
+		}
+	}
+	if len(report.NextActions) > 0 {
+		b.WriteString("\n## Ideation Next Actions\n")
+		for _, action := range report.NextActions {
+			fmt.Fprintf(&b, "\n- `%s`: %s\n", action.Code, action.Summary)
+			if action.Command != "" {
+				fmt.Fprintf(&b, "  - Command: `%s`\n", action.Command)
+			}
+			if action.Evidence != "" {
+				fmt.Fprintf(&b, "  - Evidence: %s\n", action.Evidence)
+			}
+		}
+	}
+	if len(report.Warnings) > 0 {
+		b.WriteString("\n## Ideation Warnings\n")
+		for _, warning := range report.Warnings {
+			fmt.Fprintf(&b, "\n- %s\n", warning)
+		}
+	}
+	if report.Roadmap != nil {
+		b.WriteString("\n")
+		b.WriteString(ideaplan.RenderRoadmapMarkdown(*report.Roadmap))
+	}
+	return b.String()
 }
 
 // newWorkHistoryCmd creates the history command

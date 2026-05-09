@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/commitlint"
+	ideaplan "github.com/Dicklesworthstone/ntm/internal/ideation"
 	"github.com/Dicklesworthstone/ntm/internal/robot/assurance"
 )
 
@@ -335,6 +337,134 @@ func TestAppendQueueDryReservationWarning(t *testing.T) {
 	}
 }
 
+func TestQueueDryIdeationDryQueueRendersRoadmap(t *testing.T) {
+	report := fixtureQueueDryDiagnostic(true)
+	snapshot := fixtureQueueDryIdeationSnapshot()
+
+	got := buildQueueDryIdeationReport(report, snapshot, QueueDryIdeationOptions{Requested: true})
+
+	if got.Status != "rendered" {
+		t.Fatalf("Status=%q, want rendered", got.Status)
+	}
+	if !got.DryRun {
+		t.Fatalf("DryRun=false, want true")
+	}
+	if got.Roadmap == nil || got.Roadmap.RenderedCount != 1 {
+		t.Fatalf("Roadmap=%+v, want one rendered candidate", got.Roadmap)
+	}
+	if got.Guard == nil || got.Guard.Recommendation != ideaplan.GuardRecommendationIdeate {
+		t.Fatalf("Guard=%+v, want ideate", got.Guard)
+	}
+	if !containsQueueDryRecommendation(got.NextActions, "inspect_dry_run_bead_preview") {
+		t.Fatalf("next actions=%+v, want dry-run preview action", got.NextActions)
+	}
+}
+
+func TestQueueDryIdeationNonDrySkipsWithoutForce(t *testing.T) {
+	report := fixtureQueueDryDiagnostic(false)
+	report.Evidence.TriageTopIDs = []string{"bd-ready"}
+	report.Recommendations = buildQueueDryRecommendations(report)
+
+	got := skippedQueueDryIdeationReport(report, QueueDryIdeationOptions{Requested: true})
+
+	if got.Status != "skipped_ready_work" {
+		t.Fatalf("Status=%q, want skipped_ready_work", got.Status)
+	}
+	if got.Roadmap != nil {
+		t.Fatalf("Roadmap=%+v, want nil when ready work exists", got.Roadmap)
+	}
+	if !containsQueueDryRecommendation(got.NextActions, "claim_top_ready") {
+		t.Fatalf("next actions=%+v, want claim_top_ready", got.NextActions)
+	}
+}
+
+func TestQueueDryIdeationForceAllowsNonDryPreview(t *testing.T) {
+	report := fixtureQueueDryDiagnostic(false)
+	snapshot := fixtureQueueDryIdeationSnapshot()
+	snapshot.Queue.ActionableCount = 1
+	snapshot.Queue.ReadyCount = 1
+
+	got := buildQueueDryIdeationReport(report, snapshot, QueueDryIdeationOptions{Requested: true, Force: true})
+
+	if got.Status != "forced_preview" {
+		t.Fatalf("Status=%q, want forced_preview", got.Status)
+	}
+	if !got.Forced {
+		t.Fatalf("Forced=false, want true")
+	}
+	if got.Roadmap == nil || got.Roadmap.RenderedCount != 1 {
+		t.Fatalf("Roadmap=%+v, want forced preview roadmap", got.Roadmap)
+	}
+}
+
+func TestQueueDryIdeationDegradedOptionalSourcesContinue(t *testing.T) {
+	report := fixtureQueueDryDiagnostic(true)
+	report.Evidence.Reservations = QueueDryReservations{
+		Available: false,
+		Error:     "Agent Mail server unavailable",
+	}
+	report.Warnings = []string{"reservations_unavailable: Agent Mail server unavailable"}
+	snapshot := fixtureQueueDryIdeationSnapshot()
+	annotateQueueDryOptionalSources(&snapshot, report)
+
+	got := buildQueueDryIdeationReport(report, snapshot, QueueDryIdeationOptions{Requested: true})
+
+	if got.Roadmap == nil || got.Roadmap.RenderedCount != 1 {
+		t.Fatalf("Roadmap=%+v, want roadmap despite degraded optional sources", got.Roadmap)
+	}
+	for _, want := range []string{"agent_mail:reservations", "cass:context", "cm:context"} {
+		if !containsWarning(got.Warnings, want) {
+			t.Fatalf("warnings=%v, want degraded marker %q", got.Warnings, want)
+		}
+	}
+	if got.Guard == nil || got.Guard.Recommendation != ideaplan.GuardRecommendationWaitForCoordination {
+		t.Fatalf("Guard=%+v, want wait_for_coordination when reservations unavailable", got.Guard)
+	}
+}
+
+func TestQueueDryIdeationJSONOutputContainsDryRunPreview(t *testing.T) {
+	ideationReport := buildQueueDryIdeationReport(fixtureQueueDryDiagnostic(true), fixtureQueueDryIdeationSnapshot(), QueueDryIdeationOptions{Requested: true})
+	report := fixtureQueueDryDiagnostic(true)
+	report.Ideation = &ideationReport
+
+	data, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent failed: %v", err)
+	}
+	got := string(data)
+	for _, want := range []string{`"dry_run": true`, `"command_preview"`, "br create --dry-run", `"guard"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("JSON missing %q\n%s", want, got)
+		}
+	}
+}
+
+func TestQueueDryIdeationMarkdownOutputContainsRoadmap(t *testing.T) {
+	ideationReport := buildQueueDryIdeationReport(fixtureQueueDryDiagnostic(true), fixtureQueueDryIdeationSnapshot(), QueueDryIdeationOptions{Requested: true})
+	report := fixtureQueueDryDiagnostic(true)
+	report.Ideation = &ideationReport
+
+	got := queueDryMarkdown(report)
+
+	for _, want := range []string{"# Queue-Dry Diagnostic", "# Queue-Dry Ideation Dry Run", "queue-dry-ideation-dry-run", "Creation allowed: true", "br create --dry-run"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("markdown missing %q\n%s", want, got)
+		}
+	}
+}
+
+func TestQueueDryIdeationDryRunCommandsDoNotMutate(t *testing.T) {
+	got := buildQueueDryIdeationReport(fixtureQueueDryDiagnostic(true), fixtureQueueDryIdeationSnapshot(), QueueDryIdeationOptions{Requested: true})
+	if got.Roadmap == nil || len(got.Roadmap.CommandPreview) == 0 {
+		t.Fatalf("roadmap commands empty: %+v", got.Roadmap)
+	}
+	for _, command := range got.Roadmap.CommandPreview {
+		if !strings.Contains(command, "br create --dry-run") {
+			t.Fatalf("command %q is not dry-run", command)
+		}
+	}
+}
+
 func TestApplyCommitLintReportCopiesFindings(t *testing.T) {
 	report := CommitReadyResponse{
 		Success: true,
@@ -391,6 +521,64 @@ func TestAppendCommitReadyFindingMarksCriticalUnsafe(t *testing.T) {
 	if len(report.Errors) != 1 {
 		t.Fatalf("Errors=%v, want one critical status", report.Errors)
 	}
+}
+
+func fixtureQueueDryDiagnostic(dry bool) QueueDryResponse {
+	report := QueueDryResponse{
+		Success:  true,
+		QueueDry: dry,
+		Project:  "/repo",
+		Evidence: QueueDryEvidence{
+			CountsVerified: true,
+			Sync: QueueDrySyncStatus{
+				Status: "in_sync",
+			},
+			Reservations: QueueDryReservations{
+				Available: true,
+			},
+		},
+	}
+	if dry {
+		report.Evidence.ReadyCount = 0
+		report.Evidence.ActionableCount = 0
+	} else {
+		report.Evidence.ReadyCount = 1
+		report.Evidence.ActionableCount = 1
+	}
+	report.Quiescence = evaluateQueueDryQuiescence(report)
+	report.Recommendations = buildQueueDryRecommendations(report)
+	return report
+}
+
+func fixtureQueueDryIdeationSnapshot() ideaplan.IdeaEvidenceSnapshot {
+	snapshot := ideaplan.NewIdeaEvidenceSnapshot("/repo")
+	snapshot.Queue.CountsVerified = true
+	snapshot.Queue.OpenCount = 0
+	snapshot.Queue.ReadyCount = 0
+	snapshot.Queue.ActionableCount = 0
+	snapshot.Candidates = []ideaplan.IdeaCandidate{
+		{
+			ID:        "cli-dry-run",
+			Title:     "Queue-dry CLI dry-run preview",
+			Summary:   "Expose a duplicate-aware queue-dry roadmap preview through the existing work CLI.",
+			Labels:    []string{"cli", "queue-dry"},
+			Keywords:  []string{"cli", "operator", "queue", "dry", "test"},
+			SourceIDs: []string{"manual:fixture"},
+			Evidence:  []string{"queue is dry and operator requested a dry-run ideation preview"},
+			Overlap: ideaplan.OverlapVerdict{
+				Kind:       ideaplan.OverlapNovel,
+				Confidence: 0.9,
+				Evidence:   []string{"fixture candidate is intentionally novel"},
+			},
+		},
+	}
+	snapshot.RecordSource(ideaplan.CandidateSource{
+		ID:        "manual:fixture",
+		Kind:      ideaplan.SourceManual,
+		Available: true,
+		Evidence:  []string{"test fixture"},
+	})
+	return snapshot
 }
 
 func mustMkdirAll(t *testing.T, path string) {
