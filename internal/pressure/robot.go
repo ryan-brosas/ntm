@@ -32,13 +32,14 @@ type RobotSource struct {
 // Refresh first if you want a fresh sample.
 func (g *Governor) RobotSnapshot() RobotPressure {
 	snap := g.Latest()
+	mode := g.Mode()
 	out := RobotPressure{
 		Success:   true,
 		Timestamp: snap.TakenAt.UTC().Format(time.RFC3339Nano),
-		Mode:      string(g.mode),
+		Mode:      string(mode),
 		Overall:   snap.Overall.String(),
 		Limiting:  limitingStrings(snap.Limiting),
-		Enforcing: g.mode == ModeEnforce,
+		Enforcing: mode == ModeEnforce,
 	}
 	if len(snap.Readings) > 0 {
 		// Sort by source name for deterministic ordering.

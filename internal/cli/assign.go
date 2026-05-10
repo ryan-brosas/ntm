@@ -1595,7 +1595,7 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 	}
 
 	// Generate assignments using strategy
-	assignments, allocationPlan := generateAssignmentsEnhancedWithPlan(idleAgents, readyBeads, opts)
+	assignments, allocationPlan := generateAssignmentsEnhancedWithPlan(idleAgents, readyBeads, opts, fallbackReason == "")
 	result.Allocation = assignAllocationView(allocationPlan)
 	if allocationPlan != nil && allocationPlan.Decision == assign.AllocationDecisionDefer && len(assignments) == 0 {
 		for _, bead := range readyBeads {
@@ -1628,14 +1628,14 @@ func getAssignOutputEnhanced(opts *AssignCommandOptions) (*AssignOutputEnhanced,
 
 // generateAssignmentsEnhanced creates assignment recommendations using the enhanced strategy logic.
 func generateAssignmentsEnhanced(agents []assignAgentInfo, beads []bv.BeadPreview, opts *AssignCommandOptions) []AssignmentItem {
-	assignments, _ := generateAssignmentsEnhancedWithPlan(agents, beads, opts)
+	assignments, _ := generateAssignmentsEnhancedWithPlan(agents, beads, opts, true)
 	return assignments
 }
 
-func generateAssignmentsEnhancedWithPlan(agents []assignAgentInfo, beads []bv.BeadPreview, opts *AssignCommandOptions) ([]AssignmentItem, *assign.AllocationPlan) {
+func generateAssignmentsEnhancedWithPlan(agents []assignAgentInfo, beads []bv.BeadPreview, opts *AssignCommandOptions, bvAvailable bool) ([]AssignmentItem, *assign.AllocationPlan) {
 	if usesAllocationPlanner(opts) {
 		assignedAt := time.Now().UTC().Format(time.RFC3339)
-		plan := assign.PlanAllocations(buildAssignAllocationInput(agents, beads, opts))
+		plan := assign.PlanAllocations(buildAssignAllocationInput(agents, beads, opts, bvAvailable))
 		return assignmentItemsFromAllocationPlan(plan, assignedAt), &plan
 	}
 	return generateAssignmentsLegacy(agents, beads, opts), nil
@@ -1882,7 +1882,7 @@ func generateAssignmentsLegacy(agents []assignAgentInfo, beads []bv.BeadPreview,
 	return assignments
 }
 
-func buildAssignAllocationInput(agents []assignAgentInfo, beads []bv.BeadPreview, opts *AssignCommandOptions) assign.AllocationInput {
+func buildAssignAllocationInput(agents []assignAgentInfo, beads []bv.BeadPreview, opts *AssignCommandOptions, bvAvailable bool) assign.AllocationInput {
 	session := ""
 	if opts != nil {
 		session = opts.Session
@@ -1927,7 +1927,7 @@ func buildAssignAllocationInput(agents []assignAgentInfo, beads []bv.BeadPreview
 		}},
 		Pressure:    collectAssignAllocationPressure(),
 		Fairness:    assign.AllocationFairness{AgentRecentAssignments: stats.recentByAgent, SessionRecentAssignments: stats.recentBySession},
-		BVAvailable: true,
+		BVAvailable: bvAvailable,
 	}
 }
 

@@ -1145,7 +1145,7 @@ func TestGenerateAssignmentsEnhanced_BalancedPressurePrefersHeadroom(t *testing.
 		makeTestBead("b1", "Performance benchmark load test", "P1"),
 	}
 
-	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"})
+	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"}, true)
 	if plan == nil {
 		t.Fatal("balanced pressure assignment should return an allocation plan")
 	}
@@ -1172,7 +1172,7 @@ func TestGenerateAssignmentsEnhanced_BalancedPressureUnavailableFallsBack(t *tes
 	agents := []assignAgentInfo{makeTestAgent(0, "claude")}
 	beads := []bv.BeadPreview{makeTestBead("b1", "Analyze flaky assignment path", "P1")}
 
-	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"})
+	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"}, true)
 	if plan == nil {
 		t.Fatal("balanced assignment should return an allocation plan")
 	}
@@ -1191,13 +1191,38 @@ func TestGenerateAssignmentsEnhanced_BalancedPressureUnavailableFallsBack(t *tes
 	}
 }
 
+func TestGenerateAssignmentsEnhanced_BalancedBVUnavailableMarksMissing(t *testing.T) {
+	withAssignAllocationPressure(t, assign.AllocationPressure{Available: true, Level: "low", AgentHeadroom: 4})
+
+	agents := []assignAgentInfo{makeTestAgent(0, "claude")}
+	beads := []bv.BeadPreview{makeTestBead("b1", "Investigate degraded triage path", "P1")}
+
+	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"}, false)
+	if plan == nil {
+		t.Fatal("balanced assignment should return an allocation plan")
+	}
+	if len(got) != 1 {
+		t.Fatalf("bv missing: got %d assignments, want 1", len(got))
+	}
+	if !plan.Summary.BVMissing {
+		t.Fatal("plan should mark BV as missing when bvAvailable=false")
+	}
+	if !hasAssignReasonCode(got[0], string(assign.AllocationReasonBVMissing)) {
+		t.Fatalf("reason codes = %v, want %q", got[0].ReasonCodes, assign.AllocationReasonBVMissing)
+	}
+	view := assignAllocationView(plan)
+	if view == nil || !view.BVMissing {
+		t.Fatalf("allocation view = %#v, want bv-missing flag", view)
+	}
+}
+
 func TestGenerateAssignmentsEnhanced_BalancedCriticalPressureDefers(t *testing.T) {
 	withAssignAllocationPressure(t, assign.AllocationPressure{Available: true, Level: "critical", AgentHeadroom: 0})
 
 	agents := []assignAgentInfo{makeTestAgent(0, "codex")}
 	beads := []bv.BeadPreview{makeTestBead("b1", "Implement large benchmark suite", "P0")}
 
-	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"})
+	got, plan := generateAssignmentsEnhancedWithPlan(agents, beads, &AssignCommandOptions{Strategy: "balanced"}, true)
 	if len(got) != 0 {
 		t.Fatalf("critical pressure: got %d assignments, want 0", len(got))
 	}
