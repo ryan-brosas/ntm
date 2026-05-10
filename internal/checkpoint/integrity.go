@@ -505,7 +505,7 @@ func (c *Checkpoint) VerifyManifest(storage *Storage, manifest *FileManifest) *I
 		}
 
 		if actualHash != expectedHash {
-			result.Errors = append(result.Errors, fmt.Sprintf("checksum mismatch: %s (expected %s, got %s)", relPath, expectedHash[:16]+"...", actualHash[:16]+"..."))
+			result.Errors = append(result.Errors, fmt.Sprintf("checksum mismatch: %s (expected %s, got %s)", relPath, hashDisplayPrefix(expectedHash), hashDisplayPrefix(actualHash)))
 			failed++
 		} else {
 			verified++
@@ -523,6 +523,14 @@ func (c *Checkpoint) VerifyManifest(storage *Storage, manifest *FileManifest) *I
 	result.Details["total"] = fmt.Sprintf("%d", len(manifest.Files))
 
 	return result
+}
+
+func hashDisplayPrefix(hash string) string {
+	const prefixLen = 16
+	if len(hash) <= prefixLen {
+		return hash
+	}
+	return hash[:prefixLen] + "..."
 }
 
 func expectedManifestFiles(c *Checkpoint) map[string]struct{} {

@@ -1898,6 +1898,43 @@ func TestVerifyManifest_UnexpectedPathDoesNotAffectVerifiedCount(t *testing.T) {
 	}
 }
 
+func TestVerifyManifest_MalformedShortHashReportsMismatch(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	storage := NewStorageWithDir(tmpDir)
+
+	cp := &Checkpoint{
+		Version:     CurrentVersion,
+		ID:          "short-hash-manifest-cp",
+		SessionName: "short-hash-manifest-session",
+		CreatedAt:   time.Now(),
+	}
+	if err := storage.Save(cp); err != nil {
+		t.Fatal(err)
+	}
+
+	manifest, err := cp.GenerateManifest(storage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Files[MetadataFile] = "bad"
+
+	result := cp.VerifyManifest(storage, manifest)
+	if result.Valid {
+		t.Fatal("expected malformed short hash to invalidate manifest")
+	}
+	foundMismatch := false
+	for _, e := range result.Errors {
+		if strings.Contains(e, "checksum mismatch: "+MetadataFile) && strings.Contains(e, "expected bad") {
+			foundMismatch = true
+			break
+		}
+	}
+	if !foundMismatch {
+		t.Fatalf("expected checksum mismatch error for short hash, got: %v", result.Errors)
+	}
+}
+
 // =============================================================================
 // hashFile: nonexistent file
 // =============================================================================
