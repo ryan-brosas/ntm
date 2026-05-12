@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -132,6 +133,49 @@ func canonicalAgentKey(agentName string) string {
 	return canonicalWorktreeKey(agentName, "agent")
 }
 
+func worktreeNameForKeys(agentKey, sessionKey string) string {
+	// Length-prefix both components so pairs like ("a-b", "c") and
+	// ("a", "b-c") cannot resolve to the same worktree basename.
+	return fmt.Sprintf("agent-%d-%s-session-%d-%s", len(agentKey), agentKey, len(sessionKey), sessionKey)
+}
+
+func parseWorktreeNameAgentKey(name string) string {
+	if agentKey, ok := parseLengthPrefixedWorktreeName(name); ok {
+		return agentKey
+	}
+	return parseLegacyAgentKeyFromWorktreeName(name)
+}
+
+func parseLengthPrefixedWorktreeName(name string) (string, bool) {
+	rest, ok := strings.CutPrefix(name, "agent-")
+	if !ok {
+		return "", false
+	}
+	lenText, rest, ok := strings.Cut(rest, "-")
+	if !ok {
+		return "", false
+	}
+	agentLen, err := strconv.Atoi(lenText)
+	if err != nil || agentLen <= 0 || len(rest) < agentLen {
+		return "", false
+	}
+	agentKey := rest[:agentLen]
+	rest = rest[agentLen:]
+	rest, ok = strings.CutPrefix(rest, "-session-")
+	if !ok {
+		return "", false
+	}
+	lenText, rest, ok = strings.Cut(rest, "-")
+	if !ok {
+		return "", false
+	}
+	sessionLen, err := strconv.Atoi(lenText)
+	if err != nil || sessionLen <= 0 || len(rest) != sessionLen {
+		return "", false
+	}
+	return agentKey, true
+}
+
 func parseBranchAgentKey(branch string) string {
 	if !strings.HasPrefix(branch, "agent/") {
 		return ""
@@ -205,7 +249,7 @@ func (wm *WorktreeManager) ProvisionWorktree(ctx context.Context, agentName, ses
 	sessionKey := canonicalSessionKey(sessionID)
 
 	// Generate a unique worktree name
-	worktreeName := fmt.Sprintf("agent-%s-%s", agentKey, sessionKey)
+	worktreeName := worktreeNameForKeys(agentKey, sessionKey)
 	workingDir := filepath.Join(wm.baseRepo, "..", worktreeName)
 
 	// Check if worktree already exists
@@ -268,7 +312,7 @@ func (wm *WorktreeManager) ListWorktrees(ctx context.Context) ([]*WorktreeInfo, 
 func (wm *WorktreeManager) RemoveWorktree(ctx context.Context, agentName, sessionID string) error {
 	agentKey := canonicalAgentKey(agentName)
 	sessionKey := canonicalSessionKey(sessionID)
-	worktreeName := fmt.Sprintf("agent-%s-%s", agentKey, sessionKey)
+	worktreeName := worktreeNameForKeys(agentKey, sessionKey)
 	workingDir := filepath.Join(wm.baseRepo, "..", worktreeName)
 	branchName := fmt.Sprintf("agent/%s/%s", agentKey, sessionKey)
 
@@ -425,12 +469,12 @@ func (wm *WorktreeManager) getWorktreeInfo(name string) (*WorktreeInfo, error) {
 		return nil, fmt.Errorf("failed to get commit: %w", err)
 	}
 
-	// Parse agent key from the branch first. Worktree names encode both
-	// agent and session using '-' delimiters and are ambiguous when the
-	// canonical agent key itself contains '-'.
+	// Parse agent key from the branch first. Detached or renamed
+	// worktrees fall back to the generated basename, with legacy basename
+	// parsing kept for older worktrees.
 	agentName := parseBranchAgentKey(branch)
 	if agentName == "" {
-		agentName = parseLegacyAgentKeyFromWorktreeName(name)
+		agentName = parseWorktreeNameAgentKey(name)
 	}
 	if agentName == "" {
 		agentName = "unknown"
@@ -496,7 +540,7 @@ func (wm *WorktreeManager) parseWorktreeList(output string) ([]*WorktreeInfo, er
 				continue
 			}
 			if agentName == "" {
-				agentName = parseLegacyAgentKeyFromWorktreeName(basename)
+				agentName = parseWorktreeNameAgentKey(basename)
 			}
 			if agentName == "" {
 				agentName = "unknown"

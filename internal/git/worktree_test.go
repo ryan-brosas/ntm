@@ -144,7 +144,7 @@ func TestWorktreeManager_ProvisionWorktreeSanitizesAgentName(t *testing.T) {
 		t.Fatalf("ProvisionWorktree: %v", err)
 	}
 
-	assertStringEqual(t, filepath.Base(info.Path), "agent-evil-type-sess-one")
+	assertStringEqual(t, filepath.Base(info.Path), "agent-9-evil-type-session-8-sess-one")
 	assertStringEqual(t, info.Branch, "agent/evil-type/sess-one")
 	assertStringEqual(t, info.Agent, "evil-type")
 }
@@ -163,7 +163,7 @@ func TestWorktreeManager_ProvisionWorktreeNormalizesInvalidRefComponentPatterns(
 		t.Fatalf("ProvisionWorktree: %v", err)
 	}
 
-	assertStringEqual(t, filepath.Base(info.Path), "agent-alpha-team-lock-sess-one-lock")
+	assertStringEqual(t, filepath.Base(info.Path), "agent-15-alpha-team-lock-session-13-sess-one-lock")
 	assertStringEqual(t, info.Branch, "agent/alpha-team-lock/sess-one-lock")
 	assertStringEqual(t, info.Agent, "alpha-team-lock")
 }
@@ -184,11 +184,42 @@ func TestWorktreeManager_ProvisionWorktreeDistinctSafeAgentKeysDoNotAlias(t *tes
 		t.Fatalf("ProvisionWorktree second: %v", err)
 	}
 
-	assertStringEqual(t, filepath.Base(first.Path), "agent-alpha--team-sess-one")
-	assertStringEqual(t, filepath.Base(second.Path), "agent-alpha-team-sess-one")
+	assertStringEqual(t, filepath.Base(first.Path), "agent-11-alpha--team-session-8-sess-one")
+	assertStringEqual(t, filepath.Base(second.Path), "agent-10-alpha-team-session-8-sess-one")
 	assertStringNotEqual(t, first.Path, second.Path)
 	assertStringNotEqual(t, first.Branch, second.Branch)
 	assertStringNotEqual(t, first.Agent, second.Agent)
+}
+
+func TestWorktreeManager_ProvisionWorktreeSeparatesAgentAndSessionBoundaries(t *testing.T) {
+	repo := setupGitRepo(t)
+	wm, err := NewWorktreeManager(repo)
+	if err != nil {
+		t.Fatalf("NewWorktreeManager: %v", err)
+	}
+
+	first, err := wm.ProvisionWorktree(context.Background(), "a-b", "c")
+	if err != nil {
+		t.Fatalf("ProvisionWorktree first: %v", err)
+	}
+	second, err := wm.ProvisionWorktree(context.Background(), "a", "b-c")
+	if err != nil {
+		t.Fatalf("ProvisionWorktree second: %v", err)
+	}
+
+	assertStringEqual(t, filepath.Base(first.Path), "agent-3-a-b-session-1-c")
+	assertStringEqual(t, filepath.Base(second.Path), "agent-1-a-session-3-b-c")
+	assertStringNotEqual(t, first.Path, second.Path)
+	assertStringNotEqual(t, first.Branch, second.Branch)
+	assertStringNotEqual(t, first.Agent, second.Agent)
+
+	worktrees, err := wm.ListWorktrees(context.Background())
+	if err != nil {
+		t.Fatalf("ListWorktrees: %v", err)
+	}
+	if len(worktrees) != 2 {
+		t.Fatalf("expected 2 distinct worktrees, got %d", len(worktrees))
+	}
 }
 
 func TestWorktreeManager_ProvisionAndList_PreservesSanitizedHyphenatedAgent(t *testing.T) {
@@ -569,6 +600,8 @@ func TestWorktreeManager_parseWorktreeList_AgentNameExtraction(t *testing.T) {
 		{"codex fallback", "agent-cod-abcdefgh", "refs/heads/main", "cod"},
 		{"gemini fallback", "agent-gmi-sessid12", "refs/heads/main", "gmi"},
 		{"no dash after agent fallback", "agent-onlyone", "refs/heads/main", "onlyone"},
+		{"length-prefixed fallback", "agent-9-evil-type-session-8-sess-one", "refs/heads/main", "evil-type"},
+		{"length-prefixed fallback with marker in agent", "agent-15-alpha-session-x-session-1-y", "refs/heads/main", "alpha-session-x"},
 		{"hyphenated canonical key from branch", "agent-evil-type-sess-one", "refs/heads/agent/evil-type/sess-one", "evil-type"},
 	}
 
