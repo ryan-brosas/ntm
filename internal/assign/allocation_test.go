@@ -112,6 +112,37 @@ func TestPlanAllocationsAgentTypeMismatchPenalty(t *testing.T) {
 	}
 }
 
+func TestPlanAllocationsCanonicalizesPreferredAgentTypeAliases(t *testing.T) {
+	plan := PlanAllocations(AllocationInput{
+		BVAvailable: true,
+		Pressure:    AllocationPressure{Available: true, Level: "normal", AgentHeadroom: 1},
+		ReadyBeads: []AllocationReadyBead{
+			{
+				ID:                  "bd-codex",
+				Title:               "Codex alias task",
+				TaskType:            TaskBug,
+				Priority:            1,
+				GraphScore:          0.80,
+				PreferredAgentTypes: []tmux.AgentType{tmux.AgentType("openai-codex")},
+			},
+		},
+		Agents: []AllocationAgent{
+			{ID: "cod-1", Session: "impl", AgentType: tmux.AgentCodex, Idle: true, ResourceHeadroom: 0.90},
+		},
+	})
+
+	if len(plan.Recommendations) != 1 {
+		t.Fatalf("recommendations = %d, want 1", len(plan.Recommendations))
+	}
+	got := plan.Recommendations[0]
+	if allocationTestNotEqual(got.AgentType, tmux.AgentCodex) {
+		t.Fatalf("recommended agent type = %s, want %s", got.AgentType, tmux.AgentCodex)
+	}
+	if hasReason(got.ReasonCodes, AllocationReasonAgentTypeMismatch) {
+		t.Fatalf("canonical alias was treated as a mismatch: %+v", got.ReasonCodes)
+	}
+}
+
 func TestPlanAllocationsStarvationAvoidance(t *testing.T) {
 	plan := PlanAllocations(AllocationInput{
 		BVAvailable: true,

@@ -596,8 +596,9 @@ func allocationLimitReached(active, limit int) bool {
 }
 
 func allocationAgentTypeAllowed(agentType tmux.AgentType, allowed []tmux.AgentType) bool {
+	canonicalAgentType := agentType.Canonical()
 	for _, item := range allowed {
-		if agentType == item {
+		if canonicalAgentType == item.Canonical() {
 			return true
 		}
 	}
