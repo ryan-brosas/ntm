@@ -460,6 +460,46 @@ func TestTrackerManualResolve(t *testing.T) {
 	}
 }
 
+func TestTrackerResolveIfUnchangedSkipsRefreshedAlert(t *testing.T) {
+	cfg := DefaultConfig()
+	tracker := NewTracker(cfg)
+
+	alert := Alert{
+		ID:       "auto-resolve",
+		Type:     AlertRotationComplete,
+		Severity: SeverityInfo,
+		Message:  "rotation complete",
+		Source:   "context_rotation",
+	}
+
+	tracker.AddAlert(alert)
+	stored, ok := tracker.GetByID(alert.ID)
+	if !ok {
+		t.Fatal("expected alert to be active")
+	}
+
+	tracker.AddAlert(alert)
+	if tracker.resolveIfUnchanged(alert.ID, stored.LastSeenAt, stored.Count) {
+		t.Fatal("old resolver should not resolve a refreshed alert")
+	}
+
+	active := tracker.GetActive()
+	if len(active) != 1 || active[0].ID != alert.ID {
+		t.Fatalf("expected refreshed alert to remain active, got %+v", active)
+	}
+
+	refreshed, ok := tracker.GetByID(alert.ID)
+	if !ok {
+		t.Fatal("expected refreshed alert to be active")
+	}
+	if !tracker.resolveIfUnchanged(alert.ID, refreshed.LastSeenAt, refreshed.Count) {
+		t.Fatal("current resolver should resolve unchanged alert")
+	}
+	if active := tracker.GetActive(); len(active) != 0 {
+		t.Fatalf("expected alert to resolve, got active=%+v", active)
+	}
+}
+
 func TestTrackerGetByID(t *testing.T) {
 	cfg := DefaultConfig()
 	tracker := NewTracker(cfg)
