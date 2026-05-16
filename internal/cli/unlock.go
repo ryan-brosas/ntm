@@ -68,15 +68,15 @@ type UnlockResult struct {
 // the path/pane/task that was released, exposes idempotency, and
 // surfaces ownership conflicts in machine-readable shape. See ntm#129.
 type ReleaseReceipt struct {
-	Paths           []string          `json:"paths"`
-	Session         string            `json:"session"`
-	Pane            int               `json:"pane"`
-	TaskID          string            `json:"task_id"`
-	Released        bool              `json:"released"`
-	AlreadyReleased bool              `json:"already_released,omitempty"`
-	ReleaseCount    int               `json:"release_count"`
-	Timestamp       string            `json:"timestamp"`
-	Conflict        *ReleaseConflict  `json:"conflict,omitempty"`
+	Paths           []string         `json:"paths"`
+	Session         string           `json:"session"`
+	Pane            int              `json:"pane"`
+	TaskID          string           `json:"task_id"`
+	Released        bool             `json:"released"`
+	AlreadyReleased bool             `json:"already_released,omitempty"`
+	ReleaseCount    int              `json:"release_count"`
+	Timestamp       string           `json:"timestamp"`
+	Conflict        *ReleaseConflict `json:"conflict,omitempty"`
 }
 
 // ReleaseConflict captures ownership mismatches in structured form

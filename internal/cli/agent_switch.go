@@ -166,6 +166,19 @@ See ntm#139.`,
 					// Found it. If we're inside tmux, select the pane.
 					// Otherwise emit the copy-pasteable invocation.
 					if os.Getenv("TMUX") != "" {
+						// When the target is in a different session
+						// than the user's attached client, `select-pane`
+						// alone updates which pane is "current" in the
+						// target session but does NOT move the attached
+						// client — the user sees no change. Pair it
+						// with `switch-client -t <session>` so the user
+						// actually lands on the target. Running
+						// `switch-client` against the already-attached
+						// session is a tmux no-op, so this is safe even
+						// when the target is in the current session.
+						if _, err := tmux.DefaultClient.Run("switch-client", "-t", e.Session); err != nil {
+							return fmt.Errorf("tmux switch-client %s: %w", e.Session, err)
+						}
 						if _, err := tmux.DefaultClient.Run("select-pane", "-t", e.PaneID); err != nil {
 							return fmt.Errorf("tmux select-pane %s: %w", e.PaneID, err)
 						}

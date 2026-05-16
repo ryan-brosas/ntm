@@ -4,14 +4,6 @@ const nextConfig: NextConfig = {
   // Enable React strict mode for development
   reactStrictMode: true,
 
-  // Experimental features for Next.js 16
-  experimental: {
-    // Enable server actions
-    serverActions: {
-      bodySizeLimit: "2mb",
-    },
-  },
-
   // Allow connections to local NTM server during development
   async rewrites() {
     // Proxy API requests to NTM server when NEXT_PUBLIC_NTM_URL is not set

@@ -3894,8 +3894,12 @@ type DirectAssignResult struct {
 }
 
 // DispatchReceipt is the stable per-dispatch envelope wrappers consume.
-// Fields are present on dry-run too (with `would_*` semantics surfaced
-// by the surrounding envelope's Success/PaneWasBusy fields).
+// Emitted by `ntm assign --pane …` whenever transport to the pane was
+// attempted (success OR transport failure). Refusals that abort before
+// transport (PANE_BUSY, BLOCKED) do not carry a receipt — the
+// envelope's Error/Assignment fields are the proof there. The watch
+// loop's `--dry-run` planner output does not emit per-bead receipts;
+// only the live `--pane` dispatch path does.
 // See ntm#128.
 type DispatchReceipt struct {
 	WorkItemID  string                  `json:"work_item_id"`

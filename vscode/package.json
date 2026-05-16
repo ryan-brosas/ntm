@@ -2,7 +2,7 @@
   "name": "ntm-vscode",
   "displayName": "NTM Integration",
   "description": "Integration for Named Tmux Manager (NTM)",
-  "version": "1.15.1",
+  "version": "1.16.0",
   "publisher": "dicklesworthstone",
   "repository": {
     "type": "git",
@@ -114,8 +114,8 @@
     "watch": "tsc -watch -p ./"
   },
   "devDependencies": {
+    "@types/node": "^25.8.0",
     "@types/vscode": "^1.120.0",
-    "@types/node": "^25.7.0",
-    "typescript": "^5.9.3"
+    "typescript": "^6.0.3"
   }
 }

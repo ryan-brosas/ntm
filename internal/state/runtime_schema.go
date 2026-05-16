@@ -260,7 +260,7 @@ func (r *RuntimeCoordination) IsFresh() bool {
 
 // RuntimeHandoff is a cached projection of the latest normalized handoff state.
 type RuntimeHandoff struct {
-	SessionName        string     `json:"session_name"`
+	SessionName string `json:"session_name"`
 	// WorkingDir scopes the handoff to a session+repo pair so the same
 	// session_name running in different repos doesn't collide. Defaults
 	// to "" for backward compatibility with rows written before

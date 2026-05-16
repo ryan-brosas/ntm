@@ -3,11 +3,11 @@ package cli
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -60,78 +60,181 @@ These commands NEVER print raw matched secrets. Output is always safe-redacted.`
 //
 // Token-handle contract for Agent Mail prepare/send workflows. Raw token
 // material is read from an env var or file by `prepare-mail` itself,
-// scanned for redaction findings, and stashed in an in-process store
-// keyed by a random handle. The caller then invokes `ntm mail send …
-// --prepared-redaction <handle>` and the raw bytes never leave the
-// redaction surface (no wrapper logs, no prompt packets, no dry-run
-// output carry the token text).
+// scanned for redaction findings, and stashed in a per-user store keyed
+// by a random handle. The caller then invokes
+// `ntm mail send … --prepared-redaction <handle>` (a *separate* process)
+// and the raw bytes never leave the redaction surface (no wrapper logs,
+// no prompt packets, no dry-run output carry the token text).
 //
-// Storage is in-process by design — restart kills the handle, which is
-// the right behavior for a send-once flow. Each handle has a 10-minute
-// TTL so a forgotten handle doesn't keep a token resident forever.
+// Storage lives in `$XDG_RUNTIME_DIR/ntm/redaction-handles/` (typically
+// `/run/user/<uid>`, a per-user tmpfs cleared on reboot). Each handle
+// file is 0600 and contains JSON {raw, redacted_body, findings,
+// created_at}. The directory itself is created 0700. Files are deleted
+// on consume; opportunistic sweep of expired entries runs on every
+// stash. The 10-minute TTL caps how long a forgotten handle keeps a
+// token resident.
 
 const preparedRedactionTTL = 10 * time.Minute
 
-type preparedRedactionEntry struct {
-	redactedBody string
-	findings     []RedactPreviewFinding
-	createdAt    time.Time
-	// rawSecret is held only so the eventual send-side consumer can
-	// reach back through `consumePreparedRedaction` and use the
-	// original text. We deliberately do NOT expose this through any
-	// JSON or log path; the only way to retrieve it is the
-	// consume-and-drop API below.
-	rawSecret string
+// preparedRedactionPayload is the on-disk schema for a stashed handle.
+// Field names are stable wire contract for any external diagnostic
+// tooling that needs to inspect them.
+type preparedRedactionPayload struct {
+	Raw          string                 `json:"raw"`
+	RedactedBody string                 `json:"redacted_body"`
+	Findings     []RedactPreviewFinding `json:"findings"`
+	CreatedAt    time.Time              `json:"created_at"`
 }
 
-var (
-	preparedRedactionsMu sync.Mutex
-	preparedRedactions   = map[string]*preparedRedactionEntry{}
-)
+// preparedRedactionStorageDir returns the directory where handle files
+// are persisted. Uses `$XDG_RUNTIME_DIR/ntm/redaction-handles` when the
+// XDG variable is set (this is a per-user tmpfs cleared on reboot, the
+// right home for short-lived secret material). Falls back to
+// `os.TempDir()/ntm-<uid>/redaction-handles` when the XDG variable is
+// unset so non-systemd platforms still work. The directory is created
+// with 0700 so other users on the host cannot enumerate handles.
+func preparedRedactionStorageDir() (string, error) {
+	var base string
+	if x := strings.TrimSpace(os.Getenv("XDG_RUNTIME_DIR")); x != "" {
+		base = x
+	} else {
+		base = filepath.Join(os.TempDir(), fmt.Sprintf("ntm-%d", os.Getuid()))
+	}
+	dir := filepath.Join(base, "ntm", "redaction-handles")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", fmt.Errorf("create redaction-handle store: %w", err)
+	}
+	return dir, nil
+}
 
-// stashPreparedRedaction stores the raw secret + its redaction
-// summary under a freshly-generated handle. Sweeps expired entries
-// opportunistically. Returns the handle.
+// validPreparedRedactionHandle defends consumePreparedRedaction against
+// path-traversal attempts: handles must match the exact shape produced
+// by stashPreparedRedaction (`rh_` + 32 hex chars).
+func validPreparedRedactionHandle(handle string) bool {
+	if !strings.HasPrefix(handle, "rh_") {
+		return false
+	}
+	body := handle[3:]
+	if len(body) != 32 {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'f':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// sweepExpiredPreparedRedactions removes handle files older than the
+// TTL. Best-effort: errors during sweep are silently ignored so a
+// transient ENOENT never blocks a fresh stash.
+func sweepExpiredPreparedRedactions(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-preparedRedactionTTL)
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(filepath.Join(dir, e.Name()))
+		}
+	}
+}
+
+// stashPreparedRedaction writes the raw secret + its redaction summary
+// to a per-user handle file (mode 0600) under
+// `$XDG_RUNTIME_DIR/ntm/redaction-handles/`. Sweeps expired entries
+// opportunistically. Returns the handle the caller passes to
+// `ntm mail send --prepared-redaction`.
 func stashPreparedRedaction(raw, redactedBody string, findings []RedactPreviewFinding) (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("generate handle: %w", err)
 	}
 	handle := "rh_" + hex.EncodeToString(b[:])
-	preparedRedactionsMu.Lock()
-	defer preparedRedactionsMu.Unlock()
-	now := time.Now()
-	for h, e := range preparedRedactions {
-		if now.Sub(e.createdAt) > preparedRedactionTTL {
-			delete(preparedRedactions, h)
-		}
+
+	dir, err := preparedRedactionStorageDir()
+	if err != nil {
+		return "", err
 	}
-	preparedRedactions[handle] = &preparedRedactionEntry{
-		redactedBody: redactedBody,
-		findings:     findings,
-		createdAt:    now,
-		rawSecret:    raw,
+	sweepExpiredPreparedRedactions(dir)
+
+	payload := preparedRedactionPayload{
+		Raw:          raw,
+		RedactedBody: redactedBody,
+		Findings:     findings,
+		CreatedAt:    time.Now(),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("serialize prepared redaction: %w", err)
+	}
+
+	// O_EXCL ensures we never clobber an existing handle (handle is
+	// 16 random bytes so collision is negligible, but defend anyway).
+	path := filepath.Join(dir, handle+".json")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create prepared-redaction handle: %w", err)
+	}
+	if _, writeErr := f.Write(data); writeErr != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return "", fmt.Errorf("write prepared-redaction handle: %w", writeErr)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		_ = os.Remove(path)
+		return "", fmt.Errorf("close prepared-redaction handle: %w", closeErr)
 	}
 	return handle, nil
 }
 
-// consumePreparedRedaction is the send-side accessor. Returns the raw
-// secret bytes ONCE and drops the entry from the store. The returned
-// `redacted` value is what should be surfaced in JSON envelopes and
-// logs; `raw` is intended only for the wire payload to the downstream
-// transport. Returns an error when the handle is missing or expired.
+// consumePreparedRedaction is the send-side accessor. Reads the handle
+// file, removes it (consume-once semantics), and returns the raw secret
+// bytes. The returned `redacted` value is what should be surfaced in
+// JSON envelopes and logs; `raw` is intended only for the wire payload
+// to the downstream transport. Returns an error when the handle is
+// missing, malformed, expired, or the file can't be read.
 func consumePreparedRedaction(handle string) (raw, redacted string, findings []RedactPreviewFinding, err error) {
-	preparedRedactionsMu.Lock()
-	defer preparedRedactionsMu.Unlock()
-	entry, ok := preparedRedactions[handle]
-	if !ok {
-		return "", "", nil, fmt.Errorf("prepared-redaction handle %q not found (expired or never created)", handle)
+	if !validPreparedRedactionHandle(handle) {
+		return "", "", nil, fmt.Errorf("invalid prepared-redaction handle: %q", handle)
 	}
-	delete(preparedRedactions, handle)
-	if time.Since(entry.createdAt) > preparedRedactionTTL {
+	dir, err := preparedRedactionStorageDir()
+	if err != nil {
+		return "", "", nil, err
+	}
+	path := filepath.Join(dir, handle+".json")
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		if os.IsNotExist(readErr) {
+			return "", "", nil, fmt.Errorf("prepared-redaction handle %q not found (expired or never created)", handle)
+		}
+		return "", "", nil, fmt.Errorf("read prepared-redaction handle: %w", readErr)
+	}
+	// Drop the file before validating TTL so even an expired handle
+	// is cleaned up by the act of trying to consume it.
+	_ = os.Remove(path)
+
+	var payload preparedRedactionPayload
+	if jsonErr := json.Unmarshal(data, &payload); jsonErr != nil {
+		return "", "", nil, fmt.Errorf("decode prepared-redaction handle: %w", jsonErr)
+	}
+	if time.Since(payload.CreatedAt) > preparedRedactionTTL {
 		return "", "", nil, fmt.Errorf("prepared-redaction handle %q expired", handle)
 	}
-	return entry.rawSecret, entry.redactedBody, entry.findings, nil
+	return payload.Raw, payload.RedactedBody, payload.Findings, nil
 }
 
 // RedactPrepareMailResponse is the JSON envelope returned by

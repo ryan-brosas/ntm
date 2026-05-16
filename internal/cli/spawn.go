@@ -619,18 +619,18 @@ type SpawnOptions struct {
 	NoCassContext    bool
 
 	// Recovery suppression (independent of CASS)
-	NoRecovery            bool
-	Prompt                string
-	InitPrompt            string
+	NoRecovery bool
+	Prompt     string
+	InitPrompt string
 	// InitPromptWithAgentName, when true, prepends a deterministic
 	// `You are agent <session>_<type>_<idx>` preamble to the init prompt
 	// for each pane. Helps multi-agent prompts that key off identity
 	// (Agent Mail handles, beads ownership, etc.). See ntm#138.
 	InitPromptWithAgentName bool
-	LocalModel            string
-	LocalHost             string
-	LocalFallback         bool
-	LocalFallbackProvider AgentType
+	LocalModel              string
+	LocalHost               string
+	LocalFallback           bool
+	LocalFallbackProvider   AgentType
 
 	// Hooks
 	NoHooks bool
@@ -1173,48 +1173,48 @@ Examples:
 
 			assignAgentFilter := resolveSpawnAssignAgentType(assignAgentType, assignCCOnly, assignCodOnly, assignGmiOnly)
 			opts := SpawnOptions{
-				Session:               sessionName,
-				Agents:                agentSpecs.Flatten(),
-				CCCount:               ccCount,
-				CodCount:              codCount,
-				GmiCount:              gmiCount,
-				UserPane:              !noUserPane,
-				AutoRestart:           autoRestart,
-				RecipeName:            recipeName,
-				PersonaMap:            personaMap,
-				PluginMap:             pluginMap,
-				CassContextQuery:      contextQuery,
-				NoCassContext:         noCassContext,
-				NoRecovery:            noRecovery,
-				Prompt:                prompt,
-				InitPrompt:            initPrompt,
+				Session:                 sessionName,
+				Agents:                  agentSpecs.Flatten(),
+				CCCount:                 ccCount,
+				CodCount:                codCount,
+				GmiCount:                gmiCount,
+				UserPane:                !noUserPane,
+				AutoRestart:             autoRestart,
+				RecipeName:              recipeName,
+				PersonaMap:              personaMap,
+				PluginMap:               pluginMap,
+				CassContextQuery:        contextQuery,
+				NoCassContext:           noCassContext,
+				NoRecovery:              noRecovery,
+				Prompt:                  prompt,
+				InitPrompt:              initPrompt,
 				InitPromptWithAgentName: initPromptWithAgentName,
-				LocalModel:            localModel,
-				LocalHost:             localHost,
-				LocalFallback:         localFallback,
-				LocalFallbackProvider: fallbackProvider,
-				NoHooks:               noHooks,
-				Safety:                safety,
-				StaggerMode:           staggerMode,
-				StaggerDelay:          staggerDelay,
-				Stagger:               staggerDuration,
-				StaggerEnabled:        staggerEnabled,
-				ProfileList:           profileList,
-				Assign:                assignEnabled,
-				AssignStrategy:        assignStrategy,
-				AssignLimit:           assignLimit,
-				AssignReadyTimeout:    assignReadyTimeout,
-				AssignVerbose:         assignVerbose,
-				AssignQuiet:           assignQuiet,
-				AssignTimeout:         assignTimeout,
-				AssignAgentType:       assignAgentFilter,
-				UseWorktrees:          useWorktrees,
-				WorktreeName:          worktreeName,
-				PrivacyMode:           privacyMode,
-				AllowPersist:          allowPersist,
-				MarchingOrders:        marchingOrders,
-				DefaultPrompts:        cfg.Prompts,
-				Label:                 label,
+				LocalModel:              localModel,
+				LocalHost:               localHost,
+				LocalFallback:           localFallback,
+				LocalFallbackProvider:   fallbackProvider,
+				NoHooks:                 noHooks,
+				Safety:                  safety,
+				StaggerMode:             staggerMode,
+				StaggerDelay:            staggerDelay,
+				Stagger:                 staggerDuration,
+				StaggerEnabled:          staggerEnabled,
+				ProfileList:             profileList,
+				Assign:                  assignEnabled,
+				AssignStrategy:          assignStrategy,
+				AssignLimit:             assignLimit,
+				AssignReadyTimeout:      assignReadyTimeout,
+				AssignVerbose:           assignVerbose,
+				AssignQuiet:             assignQuiet,
+				AssignTimeout:           assignTimeout,
+				AssignAgentType:         assignAgentFilter,
+				UseWorktrees:            useWorktrees,
+				WorktreeName:            worktreeName,
+				PrivacyMode:             privacyMode,
+				AllowPersist:            allowPersist,
+				MarchingOrders:          marchingOrders,
+				DefaultPrompts:          cfg.Prompts,
+				Label:                   label,
 			}
 
 			normalizeSpawnOptions(&opts)
@@ -4060,16 +4060,19 @@ func preflightCodexAccountSupport(agents []FlatAgent) error {
 		return nil
 	}
 
+	// Suggest fixing only the default-model Codex agents — agents
+	// that already carry an explicit model (e.g. --cod=1:gpt-5) are
+	// already on a non-Codex model and pass the check.
 	return fmt.Errorf(
 		"refusing to spawn default Codex agent on a ChatGPT-billed account — OpenAI rejects every `gpt-*-codex` model id with HTTP 400 on ChatGPT accounts and the pane will look alive but reject the first prompt. Either upgrade to an API key (Codex CLI > `codex login`) OR pass an explicit non-Codex model: `--cod=%d:gpt-5` (see ntm#142)",
-		countCodex(agents),
+		countDefaultCodex(agents),
 	)
 }
 
-func countCodex(agents []FlatAgent) int {
+func countDefaultCodex(agents []FlatAgent) int {
 	n := 0
 	for _, a := range agents {
-		if a.Type == AgentTypeCodex {
+		if a.Type == AgentTypeCodex && a.Model == "" {
 			n++
 		}
 	}
