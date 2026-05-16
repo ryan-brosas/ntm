@@ -3293,8 +3293,16 @@ func (s *Server) handlePaneInputV1(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Build pane target
-	paneTarget := fmt.Sprintf("%s:%d", sessionID, paneIdx)
+	// Build pane target. Resolve via the pane's tmux ID (the `%N` form) so
+	// the target is base-index-independent — `<session>:<paneIdx>` looks
+	// like a pane index but tmux interprets it as a window index, which
+	// breaks on hosts with `base-index = 1` (see #141).
+	paneTarget, lookupErr := resolvePaneTargetByIndex(sessionID, paneIdx)
+	if lookupErr != nil {
+		writeErrorResponse(w, http.StatusNotFound, ErrCodeNotFound,
+			fmt.Sprintf("pane not found: %v", lookupErr), nil, reqID)
+		return
+	}
 
 	if err := tmux.SendKeys(paneTarget, req.Text, req.Enter); err != nil {
 		writeErrorResponse(w, http.StatusInternalServerError, ErrCodeInternalError, err.Error(), nil, reqID)
@@ -5889,6 +5897,26 @@ func matchesAttentionFilters(event robot.AttentionEvent, categoryFilter []string
 	}
 
 	return true
+}
+
+// resolvePaneTargetByIndex looks up the tmux pane in the given session whose
+// `pane_index` matches `paneIdx` and returns its tmux pane ID (the `%N`
+// form), which is base-index-independent. The naive `<session>:<paneIdx>`
+// target form looks like a pane index but tmux interprets the second
+// component as a *window* index, so hosts with `base-index = 1` see
+// `can't find window: N` (#141). Using the pane ID avoids the entire
+// window/pane ambiguity.
+func resolvePaneTargetByIndex(session string, paneIdx int) (string, error) {
+	panes, err := tmux.GetPanes(session)
+	if err != nil {
+		return "", fmt.Errorf("list panes: %w", err)
+	}
+	for _, p := range panes {
+		if p.Index == paneIdx {
+			return p.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no pane with index %d in session %q", paneIdx, session)
 }
 
 // parseCSVParam parses a comma-separated query parameter into a slice.

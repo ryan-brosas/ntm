@@ -362,6 +362,17 @@ func executeDiagnoseFix(diag DiagnoseOutput, opts DiagnoseOptions) error {
 	fixedCount := 0
 	failedCount := 0
 
+	// Pre-fetch panes once so we can look up each recommendation by index
+	// and dispatch tmux ops against the base-index-independent pane ID
+	// (`%N`) rather than the naive `<session>:<paneIdx>` form, which tmux
+	// interprets as a *window* index and breaks on hosts with
+	// `base-index = 1` (#141).
+	fixPanes, fixPanesErr := tmux.GetPanes(opts.Session)
+	paneIDByIndex := map[int]string{}
+	for _, p := range fixPanes {
+		paneIDByIndex[p.Index] = p.ID
+	}
+
 	for _, rec := range diag.Recommendations {
 		if !rec.AutoFixable {
 			continue
@@ -372,11 +383,23 @@ func executeDiagnoseFix(diag DiagnoseOutput, opts DiagnoseOptions) error {
 			Action: rec.Action,
 		}
 
+		paneTarget, paneFound := paneIDByIndex[rec.Pane]
+		if !paneFound {
+			attempt.Success = false
+			if fixPanesErr != nil {
+				attempt.Message = fmt.Sprintf("Failed to list panes: %v", fixPanesErr)
+			} else {
+				attempt.Message = fmt.Sprintf("Pane %d not found in session %q", rec.Pane, opts.Session)
+			}
+			failedCount++
+			fixReport.FixAttempts = append(fixReport.FixAttempts, attempt)
+			continue
+		}
+
 		switch rec.Action {
 		case "restart":
-			// Attempt to restart the pane
-			target := fmt.Sprintf("%s:.%d", opts.Session, rec.Pane)
-			err := tmux.RespawnPane(target, true)
+			// Attempt to restart the pane via its tmux pane ID.
+			err := tmux.RespawnPane(paneTarget, true)
 			if err != nil {
 				attempt.Success = false
 				attempt.Message = fmt.Sprintf("Failed to restart: %v", err)
@@ -388,9 +411,8 @@ func executeDiagnoseFix(diag DiagnoseOutput, opts DiagnoseOptions) error {
 			}
 
 		case "interrupt":
-			// Send Ctrl+C to interrupt
-			paneID := fmt.Sprintf("%s:.%d", opts.Session, rec.Pane)
-			err := tmux.SendKeys(paneID, "C-c", false)
+			// Send Ctrl+C to interrupt via the pane ID.
+			err := tmux.SendKeys(paneTarget, "C-c", false)
 			if err != nil {
 				attempt.Success = false
 				attempt.Message = fmt.Sprintf("Failed to interrupt: %v", err)
