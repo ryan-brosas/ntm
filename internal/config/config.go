@@ -5448,6 +5448,8 @@ func Diff(cfg *Config) []ConfigDiff {
 
 	// Assign defaults
 	addDiff("assign.strategy", defaults.Assign.Strategy, cfg.Assign.Strategy)
+	addDiff("assign.prompt_template", defaults.Assign.PromptTemplate, cfg.Assign.PromptTemplate)
+	addDiff("assign.prompt_template_file", defaults.Assign.PromptTemplateFile, cfg.Assign.PromptTemplateFile)
 
 	// File reservation
 	addDiff("file_reservation.enabled", defaults.FileReservation.Enabled, cfg.FileReservation.Enabled)
