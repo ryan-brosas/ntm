@@ -1642,6 +1642,13 @@ Shell Integration:
 				SkipPanes:          skipPanes,
 				PromptTemplatePath: robotBulkAssignTemplate,
 			}
+			// Project/user-level default dispatch template (#153). A per-invocation
+			// --bulk-assign-template still wins; these only fill the gap the built-in
+			// const used to occupy.
+			if cfg != nil {
+				opts.DefaultTemplate = cfg.Assign.PromptTemplate
+				opts.DefaultTemplatePath = cfg.Assign.PromptTemplateFile
+			}
 			if err := robot.PrintBulkAssign(opts); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)

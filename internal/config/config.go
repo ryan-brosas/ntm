@@ -1319,6 +1319,16 @@ type DCGConfig struct {
 // AssignConfig holds configuration for the ntm assign command
 type AssignConfig struct {
 	Strategy string `toml:"strategy"` // Default strategy: balanced, speed, quality, dependency, round-robin
+	// PromptTemplate is an inline project/user-level default for the bulk-assign
+	// dispatch prompt. When set (and no per-invocation --bulk-assign-template file
+	// is supplied), it overrides the built-in template. Placeholders follow the
+	// bulk-assign convention: {bead_id} {bead_title} {bead_type} {bead_deps}
+	// {session} {pane}. Empty means "use the built-in default".
+	PromptTemplate string `toml:"prompt_template"`
+	// PromptTemplateFile points at a file holding the default bulk-assign dispatch
+	// prompt. It takes precedence over PromptTemplate when both are set, and is
+	// itself overridden by a per-invocation --bulk-assign-template path.
+	PromptTemplateFile string `toml:"prompt_template_file"`
 }
 
 // ValidAssignStrategies are the recognized assignment strategies
@@ -3764,6 +3774,11 @@ func Print(cfg *Config, w io.Writer) error {
 	fmt.Fprintln(w, "[assign]")
 	fmt.Fprintln(w, "# Default ntm assign strategy")
 	fmt.Fprintf(w, "strategy = %q\n", cfg.Assign.Strategy)
+	fmt.Fprintln(w, "# Default bulk-assign dispatch prompt (inline). Empty = built-in template.")
+	fmt.Fprintln(w, "# Placeholders: {bead_id} {bead_title} {bead_type} {bead_deps} {session} {pane}")
+	fmt.Fprintf(w, "prompt_template = %q\n", cfg.Assign.PromptTemplate)
+	fmt.Fprintln(w, "# File holding the default bulk-assign dispatch prompt (takes precedence over prompt_template).")
+	fmt.Fprintf(w, "prompt_template_file = %q\n", cfg.Assign.PromptTemplateFile)
 	fmt.Fprintln(w)
 
 	fmt.Fprintln(w, "[spawn_pacing]")
@@ -4611,6 +4626,10 @@ func GetValue(cfg *Config, path string) (interface{}, error) {
 		switch parts[1] {
 		case "strategy":
 			return cfg.Assign.Strategy, nil
+		case "prompt_template":
+			return cfg.Assign.PromptTemplate, nil
+		case "prompt_template_file":
+			return cfg.Assign.PromptTemplateFile, nil
 		}
 	case "file_reservation":
 		if len(parts) < 2 {
