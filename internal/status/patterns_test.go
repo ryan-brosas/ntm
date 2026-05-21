@@ -295,7 +295,9 @@ func TestIsPromptLine_AgentTypeFiltering(t *testing.T) {
 }
 
 func TestDetectIdleFromOutput_MultipleLines(t *testing.T) {
-	// Test that we check multiple lines (up to 3 non-empty lines)
+	// DetectIdleFromOutput scans up to maxIdleScanLines (12) trailing
+	// non-empty lines for a prompt, then rejects the verdict if an active
+	// spinner sits below the matched prompt.
 	tests := []struct {
 		name      string
 		output    string
@@ -310,20 +312,72 @@ func TestDetectIdleFromOutput_MultipleLines(t *testing.T) {
 			expected:  true,
 		},
 		{
-			// Prompt within 3 non-empty lines is still detected
-			// "more" is checked (not prompt), "followup" is checked (not prompt),
-			// "claude>" is checked (is prompt!) -> returns true
+			// Prompt within the scan window is still detected
 			name:      "prompt in third line from end",
 			output:    "claude>\nfollowup\nmore",
 			agentType: "cc",
-			expected:  true, // Actually true because we check 3 lines
+			expected:  true,
 		},
 		{
-			// Prompt beyond 3 non-empty lines
-			name:      "prompt beyond 3 lines",
+			// Prompt a handful of lines back (the old 3-line window missed
+			// this; the wider window catches it).
+			name:      "prompt 5 lines from end within window",
 			output:    "claude>\na\nb\nc\nd",
 			agentType: "cc",
-			expected:  false, // Beyond the 3 line check window
+			expected:  true,
+		},
+		{
+			// Narrow tiled CC pane: the persistent footer (separator, hint,
+			// budget indicator, "new task?" placeholder) pushes the real ❯
+			// prompt ~8 lines up. This is the exact regression the wider window
+			// fixes — a fresh-session pane that is unambiguously idle but whose
+			// bottom 3 lines are decorative footer. (Concept from community
+			// PR #156; implemented independently.)
+			name: "narrow tiled cc pane idle below footer noise",
+			output: "❯ \n" +
+				"───────────\n" +
+				"  ⏵⏵ bypass permissions on (shift+tab to cycle)\n" +
+				"  ? for shortcu…\n" +
+				"  ● high · /eff…\n" +
+				"\n" +
+				"new task?\n" +
+				"  /cl…\n",
+			agentType: "cc",
+			expected:  true,
+		},
+		{
+			// CRITICAL false-positive guard: the same footer geometry, but the
+			// agent is actively working — a spinner is rendered below the (still
+			// drawn) input box. The wider window MUST NOT report this as idle.
+			name: "narrow tiled cc pane working with spinner below prompt",
+			output: "❯ \n" +
+				"───────────\n" +
+				"  Scurrying… (12s · esc to interrupt)\n" +
+				"  ? for shortcu…\n",
+			agentType: "cc",
+			expected:  false,
+		},
+		{
+			// A stale spinner ABOVE a fresh prompt is not active work — the most
+			// recent on-screen marker is the prompt, so the pane is idle.
+			name: "stale spinner above fresh prompt is idle",
+			output: "  Scurrying… (12s · esc to interrupt)\n" +
+				"  thought for 47s\n" +
+				"Done.\n" +
+				"❯ \n" +
+				"───────────\n",
+			agentType: "cc",
+			expected:  true,
+		},
+		{
+			// Prompt beyond the scan window must NOT be detected — guard against
+			// false positives from very-old prompt text deep in scrollback.
+			name: "prompt beyond scan window",
+			output: "claude>\n" +
+				"l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\n" +
+				"l11\nl12\nl13",
+			agentType: "cc",
+			expected:  false,
 		},
 		{
 			name:      "prompt as last line after work output",
