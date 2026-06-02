@@ -75,8 +75,13 @@ type Marker struct {
 	Why string
 
 	// Assumed is true when Substr is a best-effort inference rather than a
-	// string verified against a live Codex pane. Assumed markers are the first
-	// thing to re-check when classification misbehaves.
+	// string verified against Codex's source or a live pane. All markers in the
+	// table below are currently verified (Assumed=false): the slash-command
+	// tokens and approval-dialog copy were taken from Codex's own source
+	// (codex-rs/tui/src/bottom_pane/command_popup.rs and approval_overlay.rs),
+	// and the idle markers mirror NTM's shipping codIdlePatterns. Assumed
+	// markers, if any are added later, are the first thing to re-check when
+	// classification misbehaves.
 	Assumed bool
 }
 
@@ -94,9 +99,15 @@ type StateRule struct {
 
 // StateMarkers is the SINGLE SOURCE OF TRUTH for Codex pane-state classification.
 //
+// Every marker here is verified against Codex's own source (the slash palette
+// renders each command as "/<command>" in command_popup.rs; the approval
+// headers/option labels are literals in approval_overlay.rs) or against NTM's
+// shipping idle parser (internal/agent/patterns.go codIdlePatterns).
+//
 // To adapt to a Codex UI change, edit ONLY this table:
 //   - Add/adjust Marker.Substr values to match the new on-screen strings.
-//   - Flip Marker.Assumed to false once a string is verified against a live pane.
+//   - Keep Marker.Assumed=false for source/live-verified strings; set true only
+//     for a temporary best-effort guess pending verification.
 //   - Adjust Priority only if the precedence between overlapping overlays changes.
 //
 // Do NOT scatter string matching elsewhere. The classifier (Classify) is pure
@@ -113,50 +124,49 @@ var StateMarkers = []StateRule{
 		State:    StateDialogOpen,
 		Priority: 10,
 		Markers: []Marker{
-			// Codex approval prompts ask the user to allow/deny a command or
-			// edit. These phrasings appear in the approval modal body.
-			{Substr: "Allow command?", Why: "Codex command-approval modal title", Assumed: true},
-			{Substr: "Apply this change?", Why: "Codex edit-approval modal title", Assumed: true},
-			{Substr: "Do you want to allow", Why: "Codex approval prompt body", Assumed: true},
-			// ASSUMPTION: approval modals offer y/n style choices. The exact
-			// affordance text is unverified; "(y/n)" and the bracketed Yes/No
-			// pair are the most common Codex/terminal conventions.
-			{Substr: "[ Yes ]", Why: "modal Yes affordance", Assumed: true},
-			{Substr: "Approve  Reject", Why: "approval modal button row", Assumed: true},
-			// Box-drawing top frame is a strong signal of a framed modal. This
-			// is distinctive but can also appear in non-modal panels, so it is
-			// only used at dialog priority alongside the textual markers above.
-			// ASSUMPTION: Codex draws modals with rounded box corners (╭ … ╮).
-			{Substr: "╭─", Why: "rounded modal frame top-left (box-drawing)", Assumed: true},
+			// Approval-modal headers, verified against Codex source
+			// (codex-rs/tui/src/bottom_pane/approval_overlay.rs). Codex asks the
+			// user to approve a command, an edit/patch, or network access.
+			{Substr: "Would you like to run the following command?", Why: "command-approval modal header (approval_overlay.rs)", Assumed: false},
+			{Substr: "Would you like to make the following edits?", Why: "edit/patch-approval modal header (approval_overlay.rs)", Assumed: false},
+			{Substr: "Do you want to approve network access to", Why: "network-approval modal header (approval_overlay.rs)", Assumed: false},
+			// Approval option labels (same source). These appear only inside the
+			// approval overlay's selectable choices, so they are unambiguous.
+			{Substr: "No, and tell Codex what to do differently", Why: "approval reject option label (approval_overlay.rs)", Assumed: false},
+			{Substr: "Yes, proceed", Why: "approval accept option label (approval_overlay.rs)", Assumed: false},
 		},
 	},
 	{
 		State:    StateSlashPaletteOpen,
 		Priority: 20,
 		Markers: []Marker{
-			// When the slash palette is open Codex lists its built-in slash
-			// commands. The presence of several well-known command names in the
-			// captured frame is the most distinctive, copy-stable signal.
-			{Substr: "/approvals", Why: "slash-command list entry (approvals)", Assumed: true},
-			{Substr: "/model", Why: "slash-command list entry (model picker)", Assumed: false}, // /model is referenced elsewhere in NTM's Codex handling
-			{Substr: "/init", Why: "slash-command list entry (init)", Assumed: true},
-			{Substr: "/compact", Why: "slash-command list entry (compact context)", Assumed: true},
-			// ASSUMPTION: the palette header/hint text. Codex commonly shows a
-			// hint line while filtering slash commands.
-			{Substr: "slash commands", Why: "slash palette header/hint", Assumed: true},
+			// When the slash palette is open Codex renders each built-in command
+			// as "/<command>" — codex-rs/tui/src/bottom_pane/command_popup.rs:
+			// `format!("/{}", item.command())`. These tokens are from Codex's
+			// actual SlashCommand set; several only appear inside the palette
+			// popup, so their presence is a distinctive, copy-stable signal.
+			{Substr: "/compact", Why: "Codex /compact command — palette entry", Assumed: false},
+			{Substr: "/mention", Why: "Codex /mention command — palette entry", Assumed: false},
+			{Substr: "/review", Why: "Codex /review command — palette entry", Assumed: false},
+			{Substr: "/mcp", Why: "Codex /mcp command — palette entry", Assumed: false},
+			{Substr: "/init", Why: "Codex /init command — palette entry", Assumed: false},
+			{Substr: "/model", Why: "Codex /model command — palette entry", Assumed: false},
 		},
 	},
 	{
 		State:    StateGoalPalettePrimed,
 		Priority: 30,
 		Markers: []Marker{
-			// A primed goal/plan prompt awaiting submission. ASSUMPTION: these
-			// strings approximate Codex's plan/goal affordance; verify against a
-			// live pane and update Substr as needed.
-			{Substr: "/plan", Why: "slash entry / primed plan goal", Assumed: true},
-			{Substr: "Press Enter to send", Why: "goal primed, awaiting submit", Assumed: true},
-			{Substr: "goal:", Why: "explicit goal-entry label", Assumed: true},
-			{Substr: "Plan mode", Why: "Codex plan-mode indicator", Assumed: true},
+			// /goal and /plan are real Codex SlashCommands (verified in
+			// codex-rs/tui/src/bottom_pane/command_popup.rs). This rule fires when
+			// a goal/plan command is present WITHOUT the broader palette listing
+			// (priority 20 wins when the full palette is open). NOTE: the one
+			// distinction still worth a live-pane confirmation is "goal primed
+			// (selected, awaiting submit)" vs "/goal merely listed" — the tokens
+			// themselves are source-verified, but the primed sub-state rendering
+			// was not captured live (this sandbox kills detached tmux panes).
+			{Substr: "/goal", Why: "Codex /goal command (goal prime)", Assumed: false},
+			{Substr: "/plan", Why: "Codex /plan command (plan mode)", Assumed: false},
 		},
 	},
 	{
@@ -164,14 +174,12 @@ var StateMarkers = []StateRule{
 		Priority: 40,
 		Markers: []Marker{
 			// Quiescent Codex prompt waiting for input. These mirror the idle
-			// markers already used by NTM's agent state parser
+			// markers already shipping in NTM's agent state parser
 			// (internal/agent/patterns.go codIdlePatterns), so they are the most
-			// trustworthy markers in this table.
+			// battle-tested markers in this table.
 			{Substr: "? for shortcuts", Why: "Codex idle prompt hint line", Assumed: false},
 			{Substr: "codex>", Why: "Codex shell-style prompt", Assumed: false},
-			// ASSUMPTION: the chevron prompt glyph. patterns.go matches a "›"
-			// chevron at line start for the idle Codex prompt.
-			{Substr: "›", Why: "Codex chevron input prompt", Assumed: false},
+			{Substr: "›", Why: "Codex chevron input prompt (patterns.go codIdlePatterns)", Assumed: false},
 		},
 	},
 }

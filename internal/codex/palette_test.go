@@ -5,11 +5,12 @@ import (
 	"testing"
 )
 
-// Representative captured-pane fixtures, one per state. These approximate what a
-// tmux capture of a Codex pane would contain in each state. Where the exact
-// Codex string is unverified (see Marker.Assumed in palette.go), the fixture
-// uses the same best-effort string the table matches, so the test proves the
-// classifier wiring even if the literal copy later needs correcting.
+// Representative captured-pane fixtures, one per state. These approximate a
+// tmux capture of a Codex pane in each state, built from strings verified
+// against Codex's own source: the slash palette renders each command as
+// "/<command>" (codex-rs/tui/src/bottom_pane/command_popup.rs), and the
+// approval headers/option labels are from
+// codex-rs/tui/src/bottom_pane/approval_overlay.rs.
 const (
 	fixtureIdle = `
 Welcome to Codex.
@@ -21,26 +22,30 @@ Welcome to Codex.
 	fixtureSlashPaletteOpen = `
 › /
   /model      switch the active model
-  /approvals  configure approval policy
-  /init       initialize project context
-  /compact    compact the conversation
-slash commands
+  /review     review my current changes
+  /init       create an AGENTS.md file
+  /compact    summarize conversation to prevent hitting the context limit
+  /mention    mention a file
+  /mcp        list configured MCP servers
 `
 
+	// A slash palette filtered to goal/plan commands (e.g. after typing "/g" or
+	// "/p") — the broad palette entries are absent, so the goal rule wins over
+	// the general slash-palette rule.
 	fixtureGoalPalettePrimed = `
-Plan mode
-
-goal: implement the palette-state classifier
-Press Enter to send
+› /
+  /goal   set the active goal for this session
+  /plan   enter plan mode
 `
 
 	fixtureDialogOpen = `
-╭───────────────────────────────────────────╮
-│ Allow command?                            │
-│   $ rm -rf build/                          │
-│ Do you want to allow this command?         │
-│   [ Yes ]   [ No ]                         │
-╰───────────────────────────────────────────╯
+╭─────────────────────────────────────────────────╮
+│ Would you like to run the following command?     │
+│   $ rm -rf build/                                │
+│                                                  │
+│ › 1. Yes, proceed                                │
+│   2. No, and tell Codex what to do differently   │
+╰─────────────────────────────────────────────────╯
 `
 
 	fixtureUnknown = `
@@ -67,19 +72,19 @@ func TestClassify_PerState(t *testing.T) {
 			name:        "slash_palette_open",
 			content:     fixtureSlashPaletteOpen,
 			wantState:   StateSlashPaletteOpen,
-			wantMarkers: []string{"/approvals", "/model", "/init", "/compact", "slash commands"},
+			wantMarkers: []string{"/compact", "/mention", "/review", "/mcp", "/init", "/model"},
 		},
 		{
 			name:        "goal_palette_primed",
 			content:     fixtureGoalPalettePrimed,
 			wantState:   StateGoalPalettePrimed,
-			wantMarkers: []string{"Press Enter to send", "goal:", "Plan mode"},
+			wantMarkers: []string{"/goal", "/plan"},
 		},
 		{
 			name:        "dialog_open",
 			content:     fixtureDialogOpen,
 			wantState:   StateDialogOpen,
-			wantMarkers: []string{"Allow command?", "Do you want to allow", "[ Yes ]", "╭─"},
+			wantMarkers: []string{"Would you like to run the following command?", "No, and tell Codex what to do differently", "Yes, proceed"},
 		},
 		{
 			name:        "unknown",
