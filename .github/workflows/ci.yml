@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["main", "develop"]
+    branches: ["main"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:
@@ -17,7 +17,7 @@ permissions:
   security-events: write  # For SARIF upload
 
 env:
-  GO_VERSION: "1.25"
+  GO_VERSION: "1.26.3"
 
 jobs:
   # ============================================================================
