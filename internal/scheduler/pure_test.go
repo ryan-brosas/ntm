@@ -325,6 +325,42 @@ func TestJobQueue_ListAll(t *testing.T) {
 	}
 }
 
+func TestJobQueue_ListAllReturnsPriorityOrder(t *testing.T) {
+	t.Parallel()
+
+	q := NewJobQueue()
+	now := time.Now()
+	blocked := NewSpawnJob("blocked", JobTypeSession, "blocked-session")
+	blocked.Priority = PriorityUrgent
+	blocked.CreatedAt = now
+	low := NewSpawnJob("low", JobTypeSession, "low-session")
+	low.Priority = PriorityLow
+	low.CreatedAt = now.Add(time.Second)
+	high := NewSpawnJob("high", JobTypeSession, "high-session")
+	high.Priority = PriorityHigh
+	high.CreatedAt = now.Add(2 * time.Second)
+
+	q.Enqueue(blocked)
+	q.Enqueue(low)
+	q.Enqueue(high)
+
+	all := q.ListAll()
+	if len(all) != 3 {
+		t.Fatalf("ListAll returned %d items, want 3", len(all))
+	}
+	got := []string{all[0].ID, all[1].ID, all[2].ID}
+	want := []string{"blocked", "high", "low"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ListAll order=%v, want %v", got, want)
+		}
+	}
+
+	if first := q.Dequeue(); first.ID != "blocked" {
+		t.Fatalf("ListAll mutated queue heap: first Dequeue()=%q, want blocked", first.ID)
+	}
+}
+
 func TestJobQueue_ListBySession(t *testing.T) {
 	t.Parallel()
 	q := NewJobQueue()
@@ -345,6 +381,24 @@ func TestJobQueue_ListBySession(t *testing.T) {
 	noneJobs := q.ListBySession("missing")
 	if len(noneJobs) != 0 {
 		t.Errorf("ListBySession('missing') = %d, want 0", len(noneJobs))
+	}
+}
+
+func TestJobQueue_ListBySession_UsesSnapshottedFieldsOnSamePointerMutation(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	j := NewSpawnJob("j1", JobTypeSession, "alpha")
+	q.Enqueue(j)
+	j.SessionName = "mutated-session"
+
+	alphaJobs := q.ListBySession("alpha")
+	if len(alphaJobs) != 1 || alphaJobs[0].ID != "j1" {
+		t.Fatalf("ListBySession('alpha') = %v, want [j1] from snapshotted index fields", alphaJobs)
+	}
+	mutatedJobs := q.ListBySession("mutated-session")
+	if len(mutatedJobs) != 0 {
+		t.Fatalf("ListBySession('mutated-session') = %d, want 0", len(mutatedJobs))
 	}
 }
 
@@ -371,6 +425,25 @@ func TestJobQueue_ListByBatch(t *testing.T) {
 	bJobs := q.ListByBatch("batch-B")
 	if len(bJobs) != 1 {
 		t.Errorf("ListByBatch('batch-B') = %d, want 1", len(bJobs))
+	}
+}
+
+func TestJobQueue_ListByBatch_UsesSnapshottedFieldsOnSamePointerMutation(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	j := NewSpawnJob("j1", JobTypeSession, "s")
+	j.BatchID = "batch-A"
+	q.Enqueue(j)
+	j.BatchID = "mutated-batch"
+
+	aJobs := q.ListByBatch("batch-A")
+	if len(aJobs) != 1 || aJobs[0].ID != "j1" {
+		t.Fatalf("ListByBatch('batch-A') = %v, want [j1] from snapshotted index fields", aJobs)
+	}
+	mutatedJobs := q.ListByBatch("mutated-batch")
+	if len(mutatedJobs) != 0 {
+		t.Fatalf("ListByBatch('mutated-batch') = %d, want 0", len(mutatedJobs))
 	}
 }
 
@@ -636,6 +709,156 @@ func TestJobQueue_Enqueue_Update(t *testing.T) {
 	}
 }
 
+// bd-m0n8c: pre-fix, an Enqueue that updated an existing job-ID with a
+// changed Priority/Type/SessionName/BatchID left the old buckets'
+// counts dangling and never bumped the new bucket. Stats() then
+// reported the wrong distribution; CountBySession / CountByBatch
+// returned phantom counts. Same family as bd-o35sn (Stats drift on
+// Dequeue/Cancel) and bd-s8sex (cross-axis drift on Cancel).
+func TestJobQueue_Enqueue_Update_RebucketsStats(t *testing.T) {
+	t.Parallel()
+
+	t.Run("priority change", func(t *testing.T) {
+		t.Parallel()
+		q := NewJobQueue()
+		j1 := NewSpawnJob("j1", JobTypeSession, "s")
+		j1.Priority = PriorityNormal
+		q.Enqueue(j1)
+
+		j1u := NewSpawnJob("j1", JobTypeSession, "s")
+		j1u.Priority = PriorityUrgent
+		q.Enqueue(j1u)
+
+		stats := q.Stats()
+		if got := stats.ByPriority[PriorityUrgent]; got != 1 {
+			t.Errorf("ByPriority[Urgent] = %d, want 1", got)
+		}
+		if _, present := stats.ByPriority[PriorityNormal]; present {
+			t.Errorf("ByPriority[Normal] should be deleted (drift), got = %v", stats.ByPriority)
+		}
+		if stats.CurrentSize != 1 {
+			t.Errorf("CurrentSize = %d, want 1", stats.CurrentSize)
+		}
+	})
+
+	t.Run("type change", func(t *testing.T) {
+		t.Parallel()
+		q := NewJobQueue()
+		j1 := NewSpawnJob("j1", JobTypeSession, "s")
+		q.Enqueue(j1)
+
+		j1u := NewSpawnJob("j1", JobTypePaneSplit, "s")
+		q.Enqueue(j1u)
+
+		stats := q.Stats()
+		if got := stats.ByType[JobTypePaneSplit]; got != 1 {
+			t.Errorf("ByType[PaneSplit] = %d, want 1", got)
+		}
+		if _, present := stats.ByType[JobTypeSession]; present {
+			t.Errorf("ByType[Session] should be deleted (drift), got = %v", stats.ByType)
+		}
+	})
+
+	t.Run("session name change", func(t *testing.T) {
+		t.Parallel()
+		q := NewJobQueue()
+		j1 := NewSpawnJob("j1", JobTypeSession, "s1")
+		q.Enqueue(j1)
+
+		j1u := NewSpawnJob("j1", JobTypeSession, "s2")
+		q.Enqueue(j1u)
+
+		if got := q.CountBySession("s2"); got != 1 {
+			t.Errorf("CountBySession(s2) = %d, want 1", got)
+		}
+		if got := q.CountBySession("s1"); got != 0 {
+			t.Errorf("CountBySession(s1) = %d, want 0 (phantom drift)", got)
+		}
+	})
+
+	t.Run("batch id change", func(t *testing.T) {
+		t.Parallel()
+		q := NewJobQueue()
+		j1 := NewSpawnJob("j1", JobTypeSession, "s")
+		j1.BatchID = "b1"
+		q.Enqueue(j1)
+
+		j1u := NewSpawnJob("j1", JobTypeSession, "s")
+		j1u.BatchID = "b2"
+		q.Enqueue(j1u)
+
+		if got := q.CountByBatch("b2"); got != 1 {
+			t.Errorf("CountByBatch(b2) = %d, want 1", got)
+		}
+		if got := q.CountByBatch("b1"); got != 0 {
+			t.Errorf("CountByBatch(b1) = %d, want 0 (phantom drift)", got)
+		}
+	})
+
+	t.Run("no-change update keeps stats stable", func(t *testing.T) {
+		t.Parallel()
+		q := NewJobQueue()
+		j1 := NewSpawnJob("j1", JobTypeSession, "s")
+		j1.Priority = PriorityNormal
+		q.Enqueue(j1)
+
+		j1same := NewSpawnJob("j1", JobTypeSession, "s")
+		j1same.Priority = PriorityNormal
+		q.Enqueue(j1same)
+
+		stats := q.Stats()
+		if stats.ByPriority[PriorityNormal] != 1 {
+			t.Errorf("ByPriority[Normal] = %d after no-op update, want 1", stats.ByPriority[PriorityNormal])
+		}
+		if stats.CurrentSize != 1 {
+			t.Errorf("CurrentSize = %d, want 1", stats.CurrentSize)
+		}
+	})
+
+	t.Run("same pointer mutation rebuckets against snapshotted old fields", func(t *testing.T) {
+		t.Parallel()
+		q := NewJobQueue()
+
+		j := NewSpawnJob("j1", JobTypeSession, "s1")
+		j.Priority = PriorityNormal
+		j.BatchID = "b1"
+		q.Enqueue(j)
+
+		// Mutate in place before re-enqueueing the same pointer.
+		j.Priority = PriorityUrgent
+		j.Type = JobTypePaneSplit
+		j.SessionName = "s2"
+		j.BatchID = "b2"
+		q.Enqueue(j)
+
+		stats := q.Stats()
+		if got := stats.ByPriority[PriorityUrgent]; got != 1 {
+			t.Errorf("ByPriority[Urgent] = %d, want 1", got)
+		}
+		if _, present := stats.ByPriority[PriorityNormal]; present {
+			t.Errorf("ByPriority[Normal] should be deleted, got = %v", stats.ByPriority)
+		}
+		if got := stats.ByType[JobTypePaneSplit]; got != 1 {
+			t.Errorf("ByType[PaneSplit] = %d, want 1", got)
+		}
+		if _, present := stats.ByType[JobTypeSession]; present {
+			t.Errorf("ByType[Session] should be deleted, got = %v", stats.ByType)
+		}
+		if got := q.CountBySession("s2"); got != 1 {
+			t.Errorf("CountBySession(s2) = %d, want 1", got)
+		}
+		if got := q.CountBySession("s1"); got != 0 {
+			t.Errorf("CountBySession(s1) = %d, want 0", got)
+		}
+		if got := q.CountByBatch("b2"); got != 1 {
+			t.Errorf("CountByBatch(b2) = %d, want 1", got)
+		}
+		if got := q.CountByBatch("b1"); got != 0 {
+			t.Errorf("CountByBatch(b1) = %d, want 0", got)
+		}
+	})
+}
+
 func TestJobQueue_Dequeue_Empty(t *testing.T) {
 	t.Parallel()
 	q := NewJobQueue()
@@ -724,6 +947,31 @@ func TestFairScheduler_MultiSession(t *testing.T) {
 	d3 = fs.TryDequeue()
 	if d3 == nil {
 		t.Error("should dequeue after marking session complete")
+	}
+}
+
+func TestFairScheduler_TryDequeueSkipsBlockedRootInPriorityOrder(t *testing.T) {
+	t.Parallel()
+
+	fs := NewFairScheduler(FairSchedulerConfig{MaxPerSession: 1, MaxPerBatch: 0})
+	blocked := NewSpawnJob("blocked", JobTypeSession, "blocked-session")
+	blocked.Priority = PriorityUrgent
+	low := NewSpawnJob("low", JobTypeSession, "low-session")
+	low.Priority = PriorityLow
+	high := NewSpawnJob("high", JobTypeSession, "high-session")
+	high.Priority = PriorityHigh
+
+	fs.Enqueue(blocked)
+	fs.Enqueue(low)
+	fs.Enqueue(high)
+	fs.running["blocked-session"] = 1
+
+	got := fs.TryDequeue()
+	if got == nil {
+		t.Fatal("TryDequeue returned nil")
+	}
+	if got.ID != "high" {
+		t.Fatalf("TryDequeue()=%q, want high-priority eligible sibling before low", got.ID)
 	}
 }
 
@@ -1627,6 +1875,142 @@ func TestJobQueue_CancelBatch_DecrementsStatsByPriorityAndType(t *testing.T) {
 	}
 	if got := post.ByPriority[PriorityNormal]; got != 1 {
 		t.Errorf("post-cancel ByPriority[Normal] = %d, want 1 (j3 remains)", got)
+	}
+}
+
+// bd-bsjrl: cancellation matching and counter decrements must use the
+// queue's snapshotted index fields, not the live mutable SpawnJob fields.
+// Pre-fix, mutating an enqueued pointer in place could make CancelSession
+// miss jobs and leave stale session/batch/stats buckets.
+func TestJobQueue_CancelSession_UsesSnapshottedFieldsOnSamePointerMutation(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	j1 := NewSpawnJob("j1", JobTypeSession, "s1")
+	j1.Priority = PriorityHigh
+	j1.BatchID = "b1"
+	q.Enqueue(j1)
+
+	j2 := NewSpawnJob("j2", JobTypeSession, "s2")
+	j2.Priority = PriorityNormal
+	j2.BatchID = "b2"
+	q.Enqueue(j2)
+
+	// Mutate in place after enqueue; cancellation must still target the
+	// original snapshotted fields captured in jobIndexByID.
+	j1.SessionName = "mutated-session"
+	j1.BatchID = "mutated-batch"
+	j1.Priority = PriorityUrgent
+	j1.Type = JobTypePaneSplit
+
+	cancelled := q.CancelSession("s1")
+	if len(cancelled) != 1 || cancelled[0].ID != "j1" {
+		t.Fatalf("CancelSession(s1) cancelled %d jobs (%v), want exactly j1", len(cancelled), cancelled)
+	}
+
+	if got := q.Len(); got != 1 {
+		t.Fatalf("Len after CancelSession = %d, want 1", got)
+	}
+	if got := q.CountBySession("s1"); got != 0 {
+		t.Errorf("CountBySession(s1) = %d, want 0", got)
+	}
+	if got := q.CountBySession("s2"); got != 1 {
+		t.Errorf("CountBySession(s2) = %d, want 1", got)
+	}
+	if got := q.CountBySession("mutated-session"); got != 0 {
+		t.Errorf("CountBySession(mutated-session) = %d, want 0", got)
+	}
+	if got := q.CountByBatch("b1"); got != 0 {
+		t.Errorf("CountByBatch(b1) = %d, want 0", got)
+	}
+	if got := q.CountByBatch("b2"); got != 1 {
+		t.Errorf("CountByBatch(b2) = %d, want 1", got)
+	}
+	if got := q.CountByBatch("mutated-batch"); got != 0 {
+		t.Errorf("CountByBatch(mutated-batch) = %d, want 0", got)
+	}
+
+	post := q.Stats()
+	if got := post.ByPriority[PriorityNormal]; got != 1 {
+		t.Errorf("ByPriority[Normal] = %d, want 1", got)
+	}
+	if _, ok := post.ByPriority[PriorityHigh]; ok {
+		t.Errorf("ByPriority[High] should be deleted after cancelling j1")
+	}
+	if _, ok := post.ByPriority[PriorityUrgent]; ok {
+		t.Errorf("ByPriority[Urgent] should be absent (mutated live field must not drive counters)")
+	}
+	if got := post.ByType[JobTypeSession]; got != 1 {
+		t.Errorf("ByType[Session] = %d, want 1", got)
+	}
+	if _, ok := post.ByType[JobTypePaneSplit]; ok {
+		t.Errorf("ByType[PaneSplit] should be absent (mutated live field must not drive counters)")
+	}
+}
+
+func TestJobQueue_CancelBatch_UsesSnapshottedFieldsOnSamePointerMutation(t *testing.T) {
+	t.Parallel()
+	q := NewJobQueue()
+
+	j1 := NewSpawnJob("j1", JobTypeSession, "s1")
+	j1.Priority = PriorityHigh
+	j1.BatchID = "b1"
+	q.Enqueue(j1)
+
+	j2 := NewSpawnJob("j2", JobTypeSession, "s2")
+	j2.Priority = PriorityNormal
+	j2.BatchID = "b2"
+	q.Enqueue(j2)
+
+	// Mutate in place after enqueue; cancellation must still target the
+	// original snapshotted fields captured in jobIndexByID.
+	j1.SessionName = "mutated-session"
+	j1.BatchID = "mutated-batch"
+	j1.Priority = PriorityUrgent
+	j1.Type = JobTypePaneSplit
+
+	cancelled := q.CancelBatch("b1")
+	if len(cancelled) != 1 || cancelled[0].ID != "j1" {
+		t.Fatalf("CancelBatch(b1) cancelled %d jobs (%v), want exactly j1", len(cancelled), cancelled)
+	}
+
+	if got := q.Len(); got != 1 {
+		t.Fatalf("Len after CancelBatch = %d, want 1", got)
+	}
+	if got := q.CountByBatch("b1"); got != 0 {
+		t.Errorf("CountByBatch(b1) = %d, want 0", got)
+	}
+	if got := q.CountByBatch("b2"); got != 1 {
+		t.Errorf("CountByBatch(b2) = %d, want 1", got)
+	}
+	if got := q.CountByBatch("mutated-batch"); got != 0 {
+		t.Errorf("CountByBatch(mutated-batch) = %d, want 0", got)
+	}
+	if got := q.CountBySession("s1"); got != 0 {
+		t.Errorf("CountBySession(s1) = %d, want 0", got)
+	}
+	if got := q.CountBySession("s2"); got != 1 {
+		t.Errorf("CountBySession(s2) = %d, want 1", got)
+	}
+	if got := q.CountBySession("mutated-session"); got != 0 {
+		t.Errorf("CountBySession(mutated-session) = %d, want 0", got)
+	}
+
+	post := q.Stats()
+	if got := post.ByPriority[PriorityNormal]; got != 1 {
+		t.Errorf("ByPriority[Normal] = %d, want 1", got)
+	}
+	if _, ok := post.ByPriority[PriorityHigh]; ok {
+		t.Errorf("ByPriority[High] should be deleted after cancelling j1")
+	}
+	if _, ok := post.ByPriority[PriorityUrgent]; ok {
+		t.Errorf("ByPriority[Urgent] should be absent (mutated live field must not drive counters)")
+	}
+	if got := post.ByType[JobTypeSession]; got != 1 {
+		t.Errorf("ByType[Session] = %d, want 1", got)
+	}
+	if _, ok := post.ByType[JobTypePaneSplit]; ok {
+		t.Errorf("ByType[PaneSplit] should be absent (mutated live field must not drive counters)")
 	}
 }
 
