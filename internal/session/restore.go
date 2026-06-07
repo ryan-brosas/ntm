@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
+	"github.com/Dicklesworthstone/ntm/internal/agentsession"
 	"github.com/Dicklesworthstone/ntm/internal/audit"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -300,6 +301,148 @@ func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands) 
 		return fmt.Errorf("all %d agent launch attempts failed", attempted)
 	}
 	return nil
+}
+
+// ResumeOptions configures session resume (topology restore + agent relaunch
+// with provider-session resume delegated to casr / native --resume).
+type ResumeOptions struct {
+	Name       string // Name to resume as (defaults to saved name)
+	Force      bool   // Force restore even if a tmux session exists
+	PreferCASR bool   // Prefer `casr` over the native --resume flag when available
+}
+
+// ResumeResult reports per-pane outcomes of a Resume operation.
+type ResumeResult struct {
+	Session  string       `json:"session"`
+	Panes    []ResumePane `json:"panes"`
+	Resumed  int          `json:"resumed"`
+	Launched int          `json:"launched"`
+	Skipped  int          `json:"skipped"`
+}
+
+// ResumePane reports how a single pane was handled during resume.
+type ResumePane struct {
+	Index     int    `json:"index"`
+	Title     string `json:"title,omitempty"`
+	AgentType string `json:"agent_type"`
+	SessionID string `json:"session_id,omitempty"`
+	Provider  string `json:"provider,omitempty"`
+	Command   string `json:"command,omitempty"`
+	// Action is one of: "resumed" (provider session id replayed),
+	// "launched" (fresh agent, no id), "skipped" (user/unknown pane).
+	Action string `json:"action"`
+}
+
+// Resume reconstructs the tmux topology for state, then relaunches each agent
+// pane. Panes that captured a provider session id are resumed via casr / native
+// --resume; panes without an id are launched fresh. The topology recreation is
+// owned by ntm (Restore); per-pane provider-session resume is delegated to casr
+// (see internal/agentsession), keeping ntm out of provider-specific formats.
+func Resume(state *SessionState, cmds AgentCommands, opts ResumeOptions) (*ResumeResult, error) {
+	if state == nil {
+		return nil, fmt.Errorf("session state is nil")
+	}
+
+	name := opts.Name
+	if name == "" {
+		name = state.Name
+	}
+
+	// Recreate windows/panes/splits/cwd/layout (ntm-owned topology restore).
+	if err := Restore(state, RestoreOptions{Name: name, Force: opts.Force, SkipGitCheck: true}); err != nil {
+		return nil, err
+	}
+
+	panes, err := tmux.GetPanes(name)
+	if err != nil {
+		return nil, fmt.Errorf("getting panes: %w", err)
+	}
+
+	// Sort saved pane states to match Restore's creation order.
+	sorted := make([]PaneState, len(state.Panes))
+	copy(sorted, state.Panes)
+	sort.Slice(sorted, func(i, j int) bool {
+		if sorted[i].WindowIndex != sorted[j].WindowIndex {
+			return sorted[i].WindowIndex < sorted[j].WindowIndex
+		}
+		return sorted[i].Index < sorted[j].Index
+	})
+
+	result := &ResumeResult{Session: name}
+
+	for i, ps := range sorted {
+		if i >= len(panes) {
+			break
+		}
+		rp := ResumePane{Index: ps.Index, Title: ps.Title, AgentType: ps.AgentType}
+
+		// Skip user / non-agent panes.
+		if ps.AgentType == string(tmux.AgentUser) || ps.AgentType == "user" ||
+			agentsession.ResumeProvider(ps.AgentType) == "" {
+			rp.Action = "skipped"
+			result.Skipped++
+			result.Panes = append(result.Panes, rp)
+			continue
+		}
+
+		var launchCmd string
+		if ps.SessionID != "" {
+			provider := ps.SessionProvider
+			if provider == "" {
+				provider = agentsession.ResumeProvider(ps.AgentType)
+			}
+			launchCmd = agentsession.ResumeCommand(provider, ps.SessionID, opts.PreferCASR)
+			rp.SessionID = ps.SessionID
+			rp.Provider = provider
+		}
+
+		if launchCmd == "" {
+			// No captured id (or no resume path) -> fresh agent launch.
+			launchCmd = getAgentCommand(ps.AgentType, cmds)
+			rp.Action = "launched"
+		} else {
+			rp.Action = "resumed"
+		}
+
+		if launchCmd == "" {
+			rp.Action = "skipped"
+			result.Skipped++
+			result.Panes = append(result.Panes, rp)
+			continue
+		}
+
+		safeCmd, err := tmux.SanitizePaneCommand(launchCmd)
+		if err != nil {
+			rp.Action = "skipped"
+			result.Skipped++
+			result.Panes = append(result.Panes, rp)
+			continue
+		}
+		fullCmd, err := tmux.BuildPaneCommand(state.WorkDir, safeCmd)
+		if err != nil {
+			rp.Action = "skipped"
+			result.Skipped++
+			result.Panes = append(result.Panes, rp)
+			continue
+		}
+
+		if err := tmux.SendKeysForAgent(panes[i].ID, fullCmd, true, tmux.AgentType(ps.AgentType)); err != nil {
+			rp.Action = "skipped"
+			result.Skipped++
+			result.Panes = append(result.Panes, rp)
+			continue
+		}
+
+		rp.Command = launchCmd
+		if rp.Action == "resumed" {
+			result.Resumed++
+		} else {
+			result.Launched++
+		}
+		result.Panes = append(result.Panes, rp)
+	}
+
+	return result, nil
 }
 
 // getAgentCommand returns the command for an agent type.

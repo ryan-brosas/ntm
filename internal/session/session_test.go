@@ -845,7 +845,7 @@ func TestMapPaneStates(t *testing.T) {
 
 	t.Run("empty panes", func(t *testing.T) {
 		t.Parallel()
-		states := mapPaneStates(nil)
+		states := mapPaneStates(nil, "")
 		if len(states) != 0 {
 			t.Errorf("expected empty for nil input, got len=%d", len(states))
 		}
@@ -865,7 +865,7 @@ func TestMapPaneStates(t *testing.T) {
 				Height:  40,
 			},
 		}
-		states := mapPaneStates(panes)
+		states := mapPaneStates(panes, "")
 		if len(states) != 1 {
 			t.Fatalf("len = %d, want 1", len(states))
 		}
@@ -903,7 +903,7 @@ func TestMapPaneStates(t *testing.T) {
 			{Index: 1, Type: tmux.AgentClaude, Title: "proj__cc_1"},
 			{Index: 2, Type: tmux.AgentCodex, Title: "proj__cod_1"},
 		}
-		states := mapPaneStates(panes)
+		states := mapPaneStates(panes, "")
 		if len(states) != 3 {
 			t.Fatalf("len = %d, want 3", len(states))
 		}

@@ -17,24 +17,37 @@ func newSessionPersistCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "sessions",
 		Short: "Manage saved session states",
-		Long: `Save and manage tmux session state snapshots.
+		Long: `Save, archive, and resume tmux session state snapshots.
 
-Captures session configuration including agent counts, pane layout,
-working directory, and git context for later restoration.
+Captures session topology including windows, panes, splits/layout,
+working directory, git context, agent counts, and (best-effort) the
+per-pane agent CLI session id so the session can be resumed.
+
+Resume reconstructs the tmux topology (ntm-owned) and relaunches each
+pane's agent, delegating per-pane agent-session resume to casr
+(Cross Agent Session Resumer) or the agent's native --resume <id>.
 
 Examples:
   ntm sessions save                    # Save current session
   ntm sessions save myproject          # Save specific session
   ntm sessions list                    # List saved sessions
+  ntm sessions list --archived         # List archived sessions
   ntm sessions show myproject          # Show saved state details
+  ntm sessions resume myproject        # Rebuild topology + resume agents
+  ntm sessions restore myproject       # Rebuild topology (fresh agents)
+  ntm sessions archive myproject       # Move a saved session to archive
+  ntm sessions unarchive myproject     # Restore an archived session
   ntm sessions delete myproject        # Delete saved state`,
 	}
 
 	cmd.AddCommand(newSessionsSaveCmd())
 	cmd.AddCommand(newSessionsRestoreCmd())
+	cmd.AddCommand(newSessionsResumeCmd())
 	cmd.AddCommand(newSessionsListCmd())
 	cmd.AddCommand(newSessionsShowCmd())
 	cmd.AddCommand(newSessionsDeleteCmd())
+	cmd.AddCommand(newSessionsArchiveCmd())
+	cmd.AddCommand(newSessionsUnarchiveCmd())
 
 	return cmd
 }
@@ -200,31 +213,45 @@ func runSessionsSave(sessionName string, opts session.SaveOptions) error {
 }
 
 func newSessionsListCmd() *cobra.Command {
-	return &cobra.Command{
+	var archived bool
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List saved sessions",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionsList()
+			return runSessionsList(archived)
 		},
 	}
+	cmd.Flags().BoolVar(&archived, "archived", false, "list archived sessions instead of active ones")
+	return cmd
 }
 
 // SessionsListResult contains the list of saved sessions.
 type SessionsListResult struct {
 	Sessions []session.SavedSession `json:"sessions"`
 	Count    int                    `json:"count"`
+	Archived bool                   `json:"archived"`
 }
 
 func (r *SessionsListResult) Text(w io.Writer) error {
 	t := theme.Current()
 
+	label := "Saved Sessions"
+	if r.Archived {
+		label = "Archived Sessions"
+	}
+
 	if r.Count == 0 {
+		if r.Archived {
+			fmt.Fprintf(w, "%sNo archived sessions found%s\n", colorize(t.Warning), colorize(t.Text))
+			fmt.Fprintf(w, "Use 'ntm sessions archive <name>' to archive a session.\n")
+			return nil
+		}
 		fmt.Fprintf(w, "%sNo saved sessions found%s\n", colorize(t.Warning), colorize(t.Text))
 		fmt.Fprintf(w, "Use 'ntm sessions save' to save a session.\n")
 		return nil
 	}
 
-	fmt.Fprintf(w, "%sSaved Sessions%s (%d)\n", colorize(t.Blue), colorize(t.Text), r.Count)
+	fmt.Fprintf(w, "%s%s%s (%d)\n", colorize(t.Blue), label, colorize(t.Text), r.Count)
 	fmt.Fprintf(w, "─────────────────────────────────────────\n")
 
 	for _, s := range r.Sessions {
@@ -246,8 +273,12 @@ func (r *SessionsListResult) JSON() interface{} {
 	return r
 }
 
-func runSessionsList() error {
-	sessions, err := session.List()
+func runSessionsList(archived bool) error {
+	listFn := session.List
+	if archived {
+		listFn = session.ListArchived
+	}
+	sessions, err := listFn()
 	if err != nil {
 		if jsonOutput {
 			// bd-1yws7: route the read failure through a JSON envelope so
@@ -264,6 +295,7 @@ func runSessionsList() error {
 	result := &SessionsListResult{
 		Sessions: sessions,
 		Count:    len(sessions),
+		Archived: archived,
 	}
 
 	return output.New(output.WithJSON(jsonOutput)).Output(result)
@@ -598,4 +630,255 @@ func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, l
 	}
 
 	return nil
+}
+
+func newSessionsResumeCmd() *cobra.Command {
+	var (
+		name       string
+		force      bool
+		attach     bool
+		nativeFlag bool
+	)
+
+	cmd := &cobra.Command{
+		Use:   "resume <saved-name>",
+		Short: "Resume a saved session (rebuild topology + resume agents)",
+		Long: `Resume a saved session.
+
+Reconstructs the tmux topology (windows, panes, splits, cwd, layout) and
+relaunches each pane's agent. Panes that captured a provider session id at
+save time are resumed via casr (Cross Agent Session Resumer) when available,
+or the agent's native --resume <id>. Panes without a captured id are launched
+fresh. ntm owns the topology restore; per-pane agent-session resume is
+delegated to casr, not reimplemented here.
+
+Examples:
+  ntm sessions resume myproject            # Resume topology + agents
+  ntm sessions resume myproject --force    # Overwrite if session exists
+  ntm sessions resume myproject --native   # Use native --resume, skip casr
+  ntm sessions resume myproject --attach    # Attach after resume`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSessionsResume(args[0], name, force, attach, !nativeFlag)
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "resume as different session name")
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "overwrite existing session")
+	cmd.Flags().BoolVarP(&attach, "attach", "a", false, "attach after resume")
+	cmd.Flags().BoolVar(&nativeFlag, "native", false, "use the agent's native --resume instead of casr")
+
+	return cmd
+}
+
+// SessionsResumeResult reports the outcome of a resume operation.
+type SessionsResumeResult struct {
+	Success   bool                 `json:"success"`
+	SavedName string               `json:"saved_name"`
+	ResumedAs string               `json:"resumed_as"`
+	Resumed   int                  `json:"resumed"`
+	Launched  int                  `json:"launched"`
+	Skipped   int                  `json:"skipped"`
+	Panes     []session.ResumePane `json:"panes,omitempty"`
+	Error     string               `json:"error,omitempty"`
+}
+
+func (r *SessionsResumeResult) Text(w io.Writer) error {
+	t := theme.Current()
+	if !r.Success {
+		fmt.Fprintf(w, "%s✗%s Failed to resume session: %s\n",
+			colorize(t.Red), colorize(t.Text), r.Error)
+		return nil
+	}
+
+	fmt.Fprintf(w, "%s✓%s Resumed session '%s'\n",
+		colorize(t.Success), colorize(t.Text), r.ResumedAs)
+	fmt.Fprintf(w, "  %d agent(s) resumed, %d launched fresh, %d skipped\n",
+		r.Resumed, r.Launched, r.Skipped)
+	for _, p := range r.Panes {
+		marker := "·"
+		switch p.Action {
+		case "resumed":
+			marker = "↻"
+		case "launched":
+			marker = "+"
+		}
+		idInfo := ""
+		if p.SessionID != "" {
+			idInfo = fmt.Sprintf(" [%s:%s]", p.Provider, p.SessionID)
+		}
+		fmt.Fprintf(w, "  %s [%d] %s (%s)%s\n", marker, p.Index, p.Title, p.Action, idInfo)
+	}
+	return nil
+}
+
+func (r *SessionsResumeResult) JSON() interface{} { return r }
+
+func runSessionsResume(savedName, name string, force, attach, preferCASR bool) error {
+	emitFailure := func(result *SessionsResumeResult) error {
+		if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
+			return encErr
+		}
+		return jsonFailureExit()
+	}
+
+	if err := tmux.EnsureInstalled(); err != nil {
+		if jsonOutput {
+			return emitFailure(&SessionsResumeResult{Success: false, SavedName: savedName, Error: err.Error()})
+		}
+		return err
+	}
+
+	state, err := session.Load(savedName)
+	if err != nil {
+		return emitFailure(&SessionsResumeResult{Success: false, SavedName: savedName, Error: err.Error()})
+	}
+
+	cmds := session.AgentCommands{}
+	if cfg != nil {
+		cmds = session.AgentCommands{
+			Claude:   cfg.Agents.Claude,
+			Codex:    cfg.Agents.Codex,
+			Gemini:   cfg.Agents.Gemini,
+			Cursor:   cfg.Agents.Cursor,
+			Windsurf: cfg.Agents.Windsurf,
+			Aider:    cfg.Agents.Aider,
+			Opencode: cfg.Agents.Opencode,
+			Ollama:   cfg.Agents.Ollama,
+		}
+	}
+
+	res, err := session.Resume(state, cmds, session.ResumeOptions{
+		Name:       name,
+		Force:      force,
+		PreferCASR: preferCASR,
+	})
+	if err != nil {
+		return emitFailure(&SessionsResumeResult{Success: false, SavedName: savedName, Error: err.Error()})
+	}
+
+	result := &SessionsResumeResult{
+		Success:   true,
+		SavedName: savedName,
+		ResumedAs: res.Session,
+		Resumed:   res.Resumed,
+		Launched:  res.Launched,
+		Skipped:   res.Skipped,
+		Panes:     res.Panes,
+	}
+
+	if err := output.New(output.WithJSON(jsonOutput)).Output(result); err != nil {
+		return err
+	}
+
+	if attach {
+		return tmux.AttachOrSwitch(res.Session)
+	}
+	return nil
+}
+
+func newSessionsArchiveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "archive <name>",
+		Short: "Archive a saved session",
+		Long: `Move a saved session into the archive.
+
+Archived sessions no longer appear in 'ntm sessions list' but remain fully
+restorable via 'ntm sessions unarchive <name>'. Use 'ntm sessions list
+--archived' to view them.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSessionsArchive(args[0])
+		},
+	}
+	return cmd
+}
+
+// SessionsArchiveResult reports the outcome of an archive/unarchive operation.
+type SessionsArchiveResult struct {
+	Success  bool   `json:"success"`
+	Session  string `json:"session"`
+	Action   string `json:"action"`
+	FilePath string `json:"file_path,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+func (r *SessionsArchiveResult) Text(w io.Writer) error {
+	t := theme.Current()
+	if !r.Success {
+		fmt.Fprintf(w, "%s✗%s Failed to %s session: %s\n",
+			colorize(t.Red), colorize(t.Text), r.Action, r.Error)
+		return nil
+	}
+	verb := "Archived"
+	if r.Action == "unarchive" {
+		verb = "Unarchived"
+	}
+	fmt.Fprintf(w, "%s✓%s %s session '%s'\n",
+		colorize(t.Success), colorize(t.Text), verb, r.Session)
+	if r.FilePath != "" {
+		fmt.Fprintf(w, "  File: %s\n", r.FilePath)
+	}
+	return nil
+}
+
+func (r *SessionsArchiveResult) JSON() interface{} { return r }
+
+func runSessionsArchive(name string) error {
+	emitFailure := func(errMsg string) error {
+		result := &SessionsArchiveResult{Success: false, Session: name, Action: "archive", Error: errMsg}
+		if jsonOutput {
+			if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
+		}
+		return fmt.Errorf("%s", errMsg)
+	}
+
+	path, err := session.Archive(name)
+	if err != nil {
+		return emitFailure(err.Error())
+	}
+
+	result := &SessionsArchiveResult{Success: true, Session: name, Action: "archive", FilePath: path}
+	return output.New(output.WithJSON(jsonOutput)).Output(result)
+}
+
+func newSessionsUnarchiveCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:     "unarchive <name>",
+		Aliases: []string{"restore-archived"},
+		Short:   "Restore an archived session",
+		Long: `Move an archived session back into the active store.
+
+The session reappears in 'ntm sessions list' and can be resumed/restored
+normally.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSessionsUnarchive(args[0])
+		},
+	}
+	return cmd
+}
+
+func runSessionsUnarchive(name string) error {
+	emitFailure := func(errMsg string) error {
+		result := &SessionsArchiveResult{Success: false, Session: name, Action: "unarchive", Error: errMsg}
+		if jsonOutput {
+			if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
+				return encErr
+			}
+			return jsonFailureExit()
+		}
+		return fmt.Errorf("%s", errMsg)
+	}
+
+	path, err := session.Unarchive(name)
+	if err != nil {
+		return emitFailure(err.Error())
+	}
+
+	result := &SessionsArchiveResult{Success: true, Session: name, Action: "unarchive", FilePath: path}
+	return output.New(output.WithJSON(jsonOutput)).Output(result)
 }

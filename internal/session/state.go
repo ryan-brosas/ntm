@@ -67,6 +67,14 @@ type PaneState struct {
 	Width       int    `json:"width,omitempty"`   // Pane width
 	Height      int    `json:"height,omitempty"`  // Pane height
 	PaneID      string `json:"pane_id,omitempty"` // Original pane ID
+
+	// Agent CLI session linkage (for resume). Captured best-effort by
+	// discovering the most-recent provider session for the pane's cwd+agent.
+	// Resume is delegated to casr / native `--resume <id>` (see internal/agentsession),
+	// not reimplemented here.
+	SessionID       string `json:"session_id,omitempty"`       // Provider session id (e.g. Claude UUID)
+	SessionProvider string `json:"session_provider,omitempty"` // casr provider name ("claude", "codex", "gemini")
+	SessionFile     string `json:"session_file,omitempty"`     // On-disk session file id was discovered from
 }
 
 // ConfigSnapshot captures relevant config at save time.
