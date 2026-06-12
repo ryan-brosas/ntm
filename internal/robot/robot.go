@@ -6670,18 +6670,30 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 			time.Sleep(time.Duration(opts.DelayMs) * time.Millisecond)
 		}
 
-		// Determine appropriate Enter delay based on pane type.
-		// User/shell panes need a longer delay than AI agent TUIs because
-		// shells (bash, zsh) have different input buffering behavior.
-		enterDelay := tmux.DefaultEnterDelay
 		agentType := paneAgentType(pane)
-		if pane.Type == tmux.AgentUser || agentType == "user" || agentType == "unknown" {
-			enterDelay = tmux.ShellEnterDelay
-		}
 
-		// Use agent-aware send method which handles Gemini's multi-line quirks
-		// by using buffer-based paste instead of send-keys when content has newlines
-		err := tmux.SendKeysForAgentWithDelay(pane.ID, messageToSend, sendEnter, enterDelay, pane.Type)
+		var err error
+		if robotSendUsesDoubleEnter(pane.Type, agentType, sendEnter) {
+			// Agent panes get the double-Enter submission protocol (same as
+			// ntm send and the palette, #94/#187): a single delayed Enter
+			// races a busy agent TUI's busy->idle re-render and can leave
+			// the message typed-but-unsubmitted. SendKeysForAgentDoubleEnter
+			// routes through SendKeysForAgent, preserving buffer-based paste
+			// for multi-line content (Gemini/Codex/Claude quirks).
+			err = tmux.SendKeysForAgentDoubleEnter(pane.ID, messageToSend, pane.Type)
+		} else {
+			// Determine appropriate Enter delay based on pane type.
+			// User/shell panes need a longer delay than AI agent TUIs because
+			// shells (bash, zsh) have different input buffering behavior.
+			enterDelay := tmux.DefaultEnterDelay
+			if pane.Type == tmux.AgentUser || agentType == "user" || agentType == "unknown" {
+				enterDelay = tmux.ShellEnterDelay
+			}
+
+			// Use agent-aware send method which handles Gemini's multi-line quirks
+			// by using buffer-based paste instead of send-keys when content has newlines
+			err = tmux.SendKeysForAgentWithDelay(pane.ID, messageToSend, sendEnter, enterDelay, pane.Type)
+		}
 		if err != nil {
 			output.Failed = append(output.Failed, SendError{
 				Pane:  paneKey,
@@ -6704,6 +6716,21 @@ func GetSend(opts SendOptions) (*SendOutput, error) {
 	publishSendActuationOutcome(trace, opts, output)
 
 	return &output, nil
+}
+
+// robotSendUsesDoubleEnter reports whether --robot-send should deliver via the
+// double-Enter submission protocol (#187): agent panes with Enter requested.
+// User/unknown panes keep the single delayed-Enter path (shells need no
+// double-Enter and would execute a spurious empty command), as does
+// --enter=false (text staged without submission).
+func robotSendUsesDoubleEnter(paneType tmux.AgentType, resolvedType string, sendEnter bool) bool {
+	if !sendEnter {
+		return false
+	}
+	if paneType == tmux.AgentUser || resolvedType == "user" || resolvedType == "unknown" {
+		return false
+	}
+	return true
 }
 
 // paneSessionIsMultiWindow reports whether the session's panes span more than

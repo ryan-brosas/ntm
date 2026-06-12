@@ -953,3 +953,34 @@ func simulateSendDryRun(opts SendOptions, panes []mockPane) SendOutput {
 		WouldSendTo:    targets,
 	}
 }
+
+// TestRobotSendUsesDoubleEnter verifies the #187 delivery-protocol selection:
+// agent panes with Enter requested get the double-Enter submission protocol
+// (same as ntm send / palette, #94); user/unknown panes and --enter=false
+// keep the single delayed-Enter path.
+func TestRobotSendUsesDoubleEnter(t *testing.T) {
+	tests := []struct {
+		name         string
+		paneType     tmux.AgentType
+		resolvedType string
+		sendEnter    bool
+		want         bool
+	}{
+		{"claude pane with enter", tmux.AgentClaude, "claude", true, true},
+		{"codex pane with enter", tmux.AgentCodex, "codex", true, true},
+		{"gemini pane with enter", tmux.AgentGemini, "gemini", true, true},
+		{"agent pane without enter", tmux.AgentClaude, "claude", false, false},
+		{"user pane with enter", tmux.AgentUser, "user", true, false},
+		{"unknown pane with enter", tmux.AgentUnknown, "unknown", true, false},
+		{"untyped pane resolved to user", tmux.AgentUnknown, "user", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := robotSendUsesDoubleEnter(tt.paneType, tt.resolvedType, tt.sendEnter); got != tt.want {
+				t.Errorf("robotSendUsesDoubleEnter(%q, %q, %v) = %v, want %v",
+					tt.paneType, tt.resolvedType, tt.sendEnter, got, tt.want)
+			}
+		})
+	}
+}

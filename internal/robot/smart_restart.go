@@ -10,7 +10,19 @@ import (
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
+	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
+)
+
+const (
+	// shellReturnTimeout bounds the post-exit poll for the shell to return.
+	// Agents like Claude can take several seconds to tear down, so a fixed
+	// short sleep produced false SHELL_NOT_RETURNED failures (#187).
+	shellReturnTimeout = 12 * time.Second
+	// shellReturnPollInterval is the shell-return poll cadence.
+	shellReturnPollInterval = 400 * time.Millisecond
+	// smartRestartMinReadyTimeout is the floor for the post-launch ready-gate.
+	smartRestartMinReadyTimeout = 10 * time.Second
 )
 
 // =============================================================================
@@ -55,7 +67,7 @@ type SmartRestartOptions struct {
 	Prompt        string        // Optional prompt to send after restart
 	LinesCaptured int           // Lines to capture for pre-check (default: 100)
 	Verbose       bool          // Include extra debugging info
-	PostWaitTime  time.Duration // Time to wait after launch before verification (default: 6s)
+	PostWaitTime  time.Duration // Max time to wait for agent readiness after launch (ready-gate polls and exits early; floored at 10s, #187)
 	HardKill      bool          // Use hard kill (kill -9) as fallback if soft exit fails (bd-bh74z)
 	HardKillOnly  bool          // Skip soft exit entirely and use kill -9 immediately
 }
@@ -495,46 +507,31 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 			}
 		}
 
-		// Step 2: Wait for shell to return (after soft exit attempt)
-		attemptedActions = append(attemptedActions, "wait-3s")
-		seq.ExitDurationMs = 3000
-		time.Sleep(3 * time.Second)
-
-		// Step 3: Verify shell prompt
-		attemptedActions = append(attemptedActions, "verify-shell-prompt")
-		output, err := tmux.CapturePaneOutput(target, 10)
-		if err != nil {
-			if opts.HardKill {
-				softExitFailed = true
-			} else {
+		// Steps 2+3: Poll for the shell to return after the soft exit.
+		// Confirmation is primarily by PROCESS DEATH (no agent child under
+		// the pane shell): a fixed sleep plus prompt-glyph scraping produced
+		// false SHELL_NOT_RETURNED during multi-second agent teardown and
+		// false RESTARTED when a live agent's own "❯" input line satisfied
+		// the glyph heuristic (#187).
+		attemptedActions = append(attemptedActions, "wait-shell-return")
+		waitStart := time.Now()
+		shellReturned, lastOutput := waitForShellReturn(session, win, pane, shellReturnTimeout)
+		seq.ExitDurationMs = int(time.Since(waitStart).Milliseconds())
+		seq.ShellConfirmed = shellReturned
+		if !shellReturned {
+			if !opts.HardKill {
 				structErr := newRestartError(
 					ErrCodeShellNotReturned,
-					"Failed to capture pane output after exit: "+err.Error(),
+					fmt.Sprintf("Shell did not return within %s after exit - agent may still be running", shellReturnTimeout),
 					"post_exit",
 					pane,
 					agentType,
 					attemptedActions,
-					"",
-				).WithRecoveryHint("Check if the pane still exists with ntm status")
-				return seq, structErr
-			}
-		} else {
-			seq.ShellConfirmed = looksLikeShellPrompt(output)
-			if !seq.ShellConfirmed && !opts.HardKill {
-				structErr := newRestartError(
-					ErrCodeShellNotReturned,
-					"Shell prompt not detected after exit - agent may still be running",
-					"post_exit",
-					pane,
-					agentType,
-					attemptedActions,
-					output,
+					lastOutput,
 				).WithRecoveryHint(fmt.Sprintf("Try ntm --robot-smart-restart=%s --panes=%d --hard-kill, or manually kill the process", session, pane))
 				return seq, structErr
 			}
-			if !seq.ShellConfirmed {
-				softExitFailed = true
-			}
+			softExitFailed = true
 		}
 	}
 
@@ -563,35 +560,20 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 			return seq, structErr
 		}
 
-		// Wait for shell to return after hard kill
-		attemptedActions = append(attemptedActions, "wait-1s-after-kill")
-		time.Sleep(1 * time.Second)
-
-		// Verify shell prompt after hard kill
-		output, err := tmux.CapturePaneOutput(target, 10)
-		if err != nil {
+		// Poll for the shell to return after hard kill — same process-death
+		// confirmation as the soft-exit path (#187).
+		attemptedActions = append(attemptedActions, "wait-shell-return-after-kill")
+		shellReturned, lastOutput := waitForShellReturn(session, win, pane, shellReturnTimeout)
+		seq.ShellConfirmed = shellReturned
+		if !shellReturned {
 			structErr := newRestartError(
 				ErrCodeShellNotReturned,
-				"Failed to capture pane output after hard kill: "+err.Error(),
+				fmt.Sprintf("Shell did not return within %s after hard kill", shellReturnTimeout),
 				"post_hard_kill",
 				pane,
 				agentType,
 				attemptedActions,
-				"",
-			).WithRecoveryHint("Check if the pane still exists with ntm status")
-			return seq, structErr
-		}
-
-		seq.ShellConfirmed = looksLikeShellPrompt(output)
-		if !seq.ShellConfirmed {
-			structErr := newRestartError(
-				ErrCodeShellNotReturned,
-				"Shell prompt not detected after hard kill",
-				"post_hard_kill",
-				pane,
-				agentType,
-				attemptedActions,
-				output,
+				lastOutput,
 			).WithRecoveryHint("Shell may be in unexpected state - try manually running 'reset' in the pane")
 			return seq, structErr
 		}
@@ -615,19 +597,38 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 		return seq, structErr
 	}
 
-	// Step 5: Wait for agent initialization
-	waitTime := opts.PostWaitTime
-	if waitTime == 0 {
-		waitTime = 6 * time.Second
+	// Step 5: Ready-gate — poll until the agent TUI is actually up instead of
+	// sleeping a fixed interval, so the prompt is never typed into a bare
+	// shell when the agent boots slowly (#187).
+	readyTimeout := opts.PostWaitTime
+	if readyTimeout < smartRestartMinReadyTimeout {
+		readyTimeout = smartRestartMinReadyTimeout
 	}
-	attemptedActions = append(attemptedActions, fmt.Sprintf("wait-%ds", int(waitTime.Seconds())))
-	time.Sleep(waitTime)
+	attemptedActions = append(attemptedActions, "wait-agent-ready")
+	shellPID, pidErr := getShellPID(session, win, pane)
+	if pidErr != nil {
+		shellPID = 0 // ready-gate falls back to content-only detection
+	}
+	if !waitForPaneAgentReady(target, shellPID, agentType, readyTimeout) {
+		lastOutput, _ := tmux.CapturePaneOutput(target, 10)
+		structErr := newRestartError(
+			ErrCodeCCLaunchFailed,
+			fmt.Sprintf("Agent did not become ready within %s after launch", readyTimeout),
+			"launch",
+			pane,
+			agentType,
+			attemptedActions,
+			lastOutput,
+		).WithRecoveryHint("Verify the agent CLI is installed and in PATH, then check the pane with ntm status")
+		return seq, structErr
+	}
 
-	// Step 6: Send prompt if provided
+	// Step 6: Send prompt if provided — use the double-Enter submission
+	// protocol (same as ntm send / robot-send) so the prompt is reliably
+	// submitted to the agent TUI rather than left typed-but-unsubmitted.
 	if opts.Prompt != "" {
 		attemptedActions = append(attemptedActions, "send-prompt")
-		time.Sleep(500 * time.Millisecond)
-		promptErr := sendKeys(session, win, pane, opts.Prompt+"\n")
+		promptErr := tmux.SendKeysForAgentDoubleEnter(target, opts.Prompt, tmux.AgentType(agentType))
 		if promptErr != nil {
 			// Non-fatal - agent launched but prompt failed
 			seq.AgentLaunched = true
@@ -642,14 +643,73 @@ func executeRestart(session string, win, pane int, agentType string, opts SmartR
 	return seq, nil
 }
 
+// waitForShellReturn polls a pane until its shell has returned after an agent
+// exit, primarily by PROCESS DEATH: the shell has returned iff the pane shell
+// has no live child process. Pane-content heuristics are only used when the
+// process state is unknowable (#187). Returns confirmation plus the last
+// captured pane content for diagnostics.
+func waitForShellReturn(session string, win, pane int, timeout time.Duration) (bool, string) {
+	target := formatTargetWin(session, win, pane)
+	deadline := time.Now().Add(timeout)
+	lastOutput := ""
+	for {
+		if content, err := tmux.CapturePaneOutput(target, 10); err == nil {
+			lastOutput = content
+		}
+		childAlive := false
+		childKnown := false
+		if shellPID, err := getShellPID(session, win, pane); err == nil && shellPID > 0 {
+			childKnown = true
+			childAlive = process.HasChildAlive(shellPID)
+		}
+		if confirmShellReturned(childAlive, childKnown, lastOutput) {
+			return true, lastOutput
+		}
+		if time.Now().After(deadline) {
+			return false, lastOutput
+		}
+		time.Sleep(shellReturnPollInterval)
+	}
+}
+
+// confirmShellReturned reports whether a single observation confirms the pane
+// shell has returned. The primary signal is process death: when the child
+// state is known, the shell has returned iff no agent child is alive. Only
+// when process state is unknowable does it fall back to the prompt-glyph
+// heuristic — and then rejects frames the agent parser still classifies as a
+// live agent, because a busy Claude pane renders its own "❯" input line which
+// satisfies the glyph heuristic (#187).
+func confirmShellReturned(childAlive, childKnown bool, paneContent string) bool {
+	if childKnown {
+		return !childAlive
+	}
+	if !looksLikeShellPrompt(paneContent) {
+		return false
+	}
+	return !paneShowsLiveAgent(paneContent)
+}
+
+// paneShowsLiveAgent reports whether pane content is classified by the agent
+// parser as a recognizable agent TUI (the approach verifyRestart uses).
+func paneShowsLiveAgent(content string) bool {
+	parser := agent.NewParser()
+	state, err := parser.Parse(content)
+	if err != nil || state == nil {
+		return false
+	}
+	return state.Type != agent.AgentTypeUnknown && state.Type != agent.AgentTypeUser
+}
+
 func restartCanonicalAgentType(agentType string) agent.AgentType {
 	switch canonical := agent.AgentType(agentType).Canonical(); canonical {
 	case agent.AgentTypeClaudeCode,
 		agent.AgentTypeCodex,
 		agent.AgentTypeGemini,
+		agent.AgentTypeAntigravity,
 		agent.AgentTypeCursor,
 		agent.AgentTypeWindsurf,
 		agent.AgentTypeAider,
+		agent.AgentTypeOpencode,
 		agent.AgentTypeOllama,
 		agent.AgentTypeUser,
 		agent.AgentTypeUnknown:

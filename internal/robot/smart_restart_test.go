@@ -888,6 +888,9 @@ func TestRestartCanonicalAgentType(t *testing.T) {
 		{"codex-cli", "cod"},
 		{"openai-codex", "cod"},
 		{"google-gemini", "gmi"},
+		{"antigravity", "agy"},
+		{"agy", "agy"},
+		{"opencode", "oc"},
 		{"ws", "windsurf"},
 		{"ollama", "ollama"},
 		{"mystery-agent", "unknown"},
@@ -913,6 +916,8 @@ func TestRestartLaunchAlias(t *testing.T) {
 		{"codex", "cod"},
 		{"openai-codex", "cod"},
 		{"google-gemini", "gmi"},
+		{"antigravity", "agy"},
+		{"opencode", "oc"},
 		{"ws", "windsurf"},
 		{"aider", "aider"},
 		{"ollama", "ollama"},
@@ -927,6 +932,81 @@ func TestRestartLaunchAlias(t *testing.T) {
 				t.Errorf("restartLaunchAlias(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestConfirmShellReturned verifies the #187 shell-return confirmation logic:
+// process death is the primary signal; the prompt-glyph heuristic is only a
+// fallback when process state is unknowable, and frames a live agent renders
+// (Claude's own "❯" input line) must be rejected there.
+func TestConfirmShellReturned(t *testing.T) {
+	claudeIdleFrame := strings.Join([]string{
+		"● Done. The command ran to completion exactly as expected.",
+		"──────────────────────────────",
+		"❯",
+		"──────────────────────────────",
+		"  ? for shortcuts        Claude Sonnet · 4% context",
+	}, "\n")
+	plainShellPrompt := strings.Join([]string{
+		"some earlier output",
+		"~/projects/demo ❯",
+	}, "\n")
+
+	tests := []struct {
+		name        string
+		childAlive  bool
+		childKnown  bool
+		paneContent string
+		want        bool
+	}{
+		{
+			name:       "agent child alive means not returned regardless of content",
+			childAlive: true, childKnown: true,
+			paneContent: plainShellPrompt,
+			want:        false,
+		},
+		{
+			name:       "process death is authoritative even with agent-looking content",
+			childAlive: false, childKnown: true,
+			paneContent: claudeIdleFrame,
+			want:        true,
+		},
+		{
+			name:       "fallback rejects live Claude frame despite prompt glyph",
+			childAlive: false, childKnown: false,
+			paneContent: claudeIdleFrame,
+			want:        false,
+		},
+		{
+			name:       "fallback accepts a plain shell prompt",
+			childAlive: false, childKnown: false,
+			paneContent: plainShellPrompt,
+			want:        true,
+		},
+		{
+			name:       "fallback rejects mid-teardown output with no prompt",
+			childAlive: false, childKnown: false,
+			paneContent: "Shutting down agent...",
+			want:        false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := confirmShellReturned(tt.childAlive, tt.childKnown, tt.paneContent); got != tt.want {
+				t.Errorf("confirmShellReturned(%v, %v, ...) = %v, want %v", tt.childAlive, tt.childKnown, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPaneShowsLiveAgent(t *testing.T) {
+	claudeFrame := "✻ Churning… (esc to interrupt)\n❯\n  Claude Sonnet"
+	if !paneShowsLiveAgent(claudeFrame) {
+		t.Error("paneShowsLiveAgent should classify a Claude frame as a live agent")
+	}
+	if paneShowsLiveAgent("~/projects/demo ❯") {
+		t.Error("paneShowsLiveAgent should not classify a bare shell prompt as an agent")
 	}
 }
 
