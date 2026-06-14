@@ -503,7 +503,7 @@ var claudeChevronBoxRe = regexp.MustCompile(`(?m)^\s*❯(?:[\s\x{00a0}].*|[\s\x{
 
 // ClaudeIdlePromptShowing reports whether a Claude Code pane is displaying an
 // idle / finished-turn prompt: the bottom-pinned input box (empty, holding
-// queued text, or an "…" placeholder), a glyph-led completion summary, or the
+// queued text, or an "…" ellipsis), a glyph-led completion summary, or the
 // post-turn "new task?" footer. It is the idle counterpart to
 // ClaudeActivelyWorking and is the single shared recognizer used by every
 // Claude state-detection path (parser, status, robot) so they agree.
@@ -538,7 +538,7 @@ func ClaudeIdlePromptShowing(output string) bool {
 
 // claudeFinishedTurnIdle reports whether the live tail shows a finished-turn
 // idle state: the bottom input box (empty, or holding queued text / an "…"
-// placeholder) and/or the post-turn "new task?" footer. Callers must already
+// ellipsis) and/or the post-turn "new task?" footer. Callers must already
 // have ruled out ClaudeActivelyWorking; this only broadens idle recognition
 // beyond the empty-chevron-only ccIdlePatterns and never overrides a working
 // verdict.

@@ -366,7 +366,7 @@ func (p *parserImpl) detectIdle(output string, agentType AgentType) bool {
 		}
 		// Idle when a finished-turn prompt is showing. This covers both the
 		// empty chevron and the broader finished-turn footer: an input box that
-		// holds queued text or an "…" placeholder, plus the post-turn
+		// holds queued text or an "…" ellipsis, plus the post-turn
 		// "new task? /clear to save … tokens" hint. We pass the full `output`
 		// (not just `lastLines`) to the footer recognizer because the box and
 		// its decorative rules can exceed the bounded idle-line window.
