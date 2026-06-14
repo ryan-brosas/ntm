@@ -133,7 +133,16 @@ var (
 	// "thought for 14s" prose annotation, hence: the leading glyph + verb, the
 	// literal " for ", a duration, and a deliberately strict end-of-line anchor
 	// that rejects any trailing "(" / "…" progress decoration.
-	claudeCompletionLineRe = regexp.MustCompile(`(?m)^\s*[✻✶✳✢✽✦*]\s+[A-Z][a-z]+\s+for\s+(?:\d+\s*[hms]\s*)+$`)
+	//
+	// The verb class is the Unicode capitalized-word class `\p{Lu}\p{Ll}+`
+	// rather than ASCII `[A-Z][a-z]+`: Claude's whimsical spinner verbs include
+	// accented forms ("✻ Sautéed for 36s", "✻ Flambéed for 12s") whose é/ü/etc.
+	// fall outside `[a-z]` and would break recognition of the turn-ended line —
+	// leaving a stale active spinner higher in the capture unsuppressed and the
+	// pane misclassified as still WORKING. `\p{Lu}` (capitalized first letter)
+	// preserves the anti-prose constraint; the whole-line and duration anchors
+	// are unchanged.
+	claudeCompletionLineRe = regexp.MustCompile(`(?m)^\s*[✻✶✳✢✽✦*]\s+\p{Lu}\p{Ll}+\s+for\s+(?:\d+\s*[hms]\s*)+$`)
 
 	// claudeNewTaskFooterRe matches the post-turn "new task?" hint Claude parks at
 	// after a turn ends (often paired with a "/clear to save … tokens" line). It
@@ -501,6 +510,21 @@ func claudeIsTurnEndedLine(line string) bool {
 // to the finished-turn-with-queued-text case.
 var claudeChevronBoxRe = regexp.MustCompile(`(?m)^\s*❯(?:[\s\x{00a0}].*|[\s\x{00a0}]*)$`)
 
+// claudeComposeBoxFooterRe matches the "⏵⏵" mode footer Claude Code renders at
+// the very bottom of its compose box (e.g. "⏵⏵ bypass permissions on (shift+tab
+// to cycle)" or "⏵⏵ accept edits on"). A freshly-spawned agent shows its init
+// prompt prefilled in the input box — or just the "…" ellipsis indicator — with
+// NO completion line and NO "new task?" hint yet, so every other turn-ended
+// recognizer misses it and the swarm never starts ("Idle Agents: 0"). The
+// "⏵⏵" footer proves the Claude TUI is alive at its compose box.
+//
+// CRITICAL: this footer is drawn DURING work too (it is permanent chrome, like
+// the input box). It is therefore only a positive idle signal when combined
+// with `!ClaudeActivelyWorking` — which every caller of ClaudeIdlePromptShowing
+// already gates on. Used ungated it would false-idle a working pane (this is
+// exactly the trap the removed "bypass permissions on" ccIdlePattern fell into).
+var claudeComposeBoxFooterRe = regexp.MustCompile(`⏵⏵`)
+
 // ClaudeIdlePromptShowing reports whether a Claude Code pane is displaying an
 // idle / finished-turn prompt: the bottom-pinned input box (empty, holding
 // queued text, or an "…" ellipsis), a glyph-led completion summary, or the
@@ -555,6 +579,15 @@ func claudeFinishedTurnIdle(output string) bool {
 		return true
 	}
 	if claudeChevronBoxRe.MatchString(tail) {
+		return true
+	}
+	// The "⏵⏵" compose-box footer means the Claude TUI is alive at its input
+	// box. Combined with the caller's required `!ClaudeActivelyWorking` gate,
+	// "box alive + no active work = idle" — this is what lets a fresh-spawn
+	// capture (init prompt prefilled or just an "…" ellipsis, no spinner) start
+	// the swarm. It is NOT gated here because ClaudeIdlePromptShowing's contract
+	// already requires callers to have ruled out active work.
+	if claudeComposeBoxFooterRe.MatchString(tail) {
 		return true
 	}
 	return false

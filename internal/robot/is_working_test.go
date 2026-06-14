@@ -329,6 +329,39 @@ codex>
 	}
 }
 
+// TestIsLiveBusy_Claude_DefersToOrderingAwareClassifier pins the Fix-6
+// behavior: for Claude panes IsLiveBusy must defer to the ordering-aware
+// agent.ClaudeActivelyWorking instead of a position-blind CategoryThinking
+// match. A STALE spinner ("· Thundering… (4s)") can sit ABOVE a turn-ended
+// completion line ("✻ Churned for 6s") in the live window; a bare
+// CategoryThinking match would see the stale spinner and report busy,
+// overriding the correct idle verdict so the dispatcher sees 0 idle agents
+// after every burst and the swarm stalls with ready work waiting.
+func TestIsLiveBusy_Claude_DefersToOrderingAwareClassifier(t *testing.T) {
+	// Stale spinner ABOVE the most-recent completion line ⇒ turn ended ⇒ idle.
+	staleSpinnerAboveCompletion := "· Thundering… (4s)\n" +
+		"● final summary of the work\n" +
+		"✻ Churned for 6s\n" +
+		"────────────\n❯ \n────────────\n"
+	if IsLiveBusy(staleSpinnerAboveCompletion, agent.AgentTypeClaudeCode.String()) {
+		t.Fatalf("IsLiveBusy(<stale spinner above completion>, claude) = true, expected false; the position-blind CategoryThinking match would override the correct idle verdict and stall the swarm")
+	}
+
+	// A genuinely active spinner (most-recent dynamic marker) ⇒ working.
+	activeSpinner := "✻ Cooked for 3m 1s\n" +
+		"● starting next step\n" +
+		"✻ Churning… (ctrl+c to interrupt · 4s)\n" +
+		"────────────\n❯ \n"
+	if !IsLiveBusy(activeSpinner, agent.AgentTypeClaudeCode.String()) {
+		t.Fatalf("IsLiveBusy(<active claude spinner>, claude) = false, expected true; a mid-turn Claude pane must read busy")
+	}
+
+	// Alias "cc" must normalize to claude and take the same path.
+	if IsLiveBusy(staleSpinnerAboveCompletion, "cc") {
+		t.Fatalf("IsLiveBusy(<stale spinner above completion>, cc) = true, expected false; the cc alias must normalize to claude")
+	}
+}
+
 // TestIsLiveBusy_WildcardPatternsDocumentTheUserPaneSkipReason locks in the
 // reason GetIsWorking gates the live-window override on `state.Type` being a
 // known AI agent: the pattern library carries agent-agnostic CategoryThinking

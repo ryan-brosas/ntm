@@ -1543,3 +1543,96 @@ func TestClaudeActivelyWorking_NeverFalseIdleInvariant(t *testing.T) {
 		}
 	}
 }
+
+// TestClaudeCompletionLine_AccentedVerb guards the Fix-3 widening of the
+// completion-verb class from ASCII `[A-Z][a-z]+` to Unicode `\p{Lu}\p{Ll}+`.
+// Claude's whimsical spinner verbs include accented forms ("Sautéed"); the é
+// falls outside `[a-z]` and previously broke turn-ended recognition, leaving a
+// stale active spinner higher in the capture unsuppressed so the pane was
+// misclassified as still WORKING (an idle agent withheld from dispatch).
+func TestClaudeCompletionLine_AccentedVerb(t *testing.T) {
+	tests := []struct {
+		name        string
+		output      string
+		wantWorking bool
+	}{
+		{
+			name:        "accented completion verb alone is a turn-ended marker (idle)",
+			output:      "✻ Sautéed for 36s\n────────────\n❯ \n────────────\n",
+			wantWorking: false,
+		},
+		{
+			name:        "another accented verb (Flambéed) is turn-ended",
+			output:      "✻ Flambéed for 1m 12s\n────────────\n❯ \n",
+			wantWorking: false,
+		},
+		{
+			name: "accented completion line AFTER a spinner wins (turn ended) ⇒ not working",
+			output: "✻ Whirlpooling… (ctrl+c to interrupt · 2m 44s · thinking)\n" +
+				"● final summary\n" +
+				"✻ Sautéed for 3m 1s\n────────────\n❯ \n",
+			wantWorking: false,
+		},
+		{
+			name:        "plain ASCII completion verb still works (no regression)",
+			output:      "✻ Cooked for 1m 42s\n────────────\n❯ \n",
+			wantWorking: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ClaudeActivelyWorking(tt.output); got != tt.wantWorking {
+				t.Errorf("ClaudeActivelyWorking() = %v, want %v", got, tt.wantWorking)
+			}
+			// The accented completion line must be recognized as a turn-ended
+			// marker directly.
+			if !claudeIsCompletionLine("✻ Sautéed for 36s") {
+				t.Errorf("claudeIsCompletionLine failed to recognize accented verb")
+			}
+		})
+	}
+}
+
+// TestClaudeComposeBoxFooter_FreshSpawnIdle guards the Fix-5 recognition of the
+// "⏵⏵" compose-box footer as an idle signal. A freshly-spawned Claude agent
+// shows its init prompt prefilled (or just the "…" ellipsis) with NO completion
+// line and NO "new task?" hint yet — every other turn-ended recognizer misses
+// it, so the swarm never starts ("Idle Agents: 0"). The footer means the TUI is
+// alive at its box; combined with !ClaudeActivelyWorking that is idle. The same
+// capture WITH an active spinner must still classify working (the footer is
+// permanent chrome).
+func TestClaudeComposeBoxFooter_FreshSpawnIdle(t *testing.T) {
+	freshSpawn := "Welcome to Claude Code\n" +
+		"────────────────────────\n" +
+		"❯ Continue working on your assigned bead…\n" +
+		"────────────────────────\n" +
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+
+	if ClaudeActivelyWorking(freshSpawn) {
+		t.Fatalf("fresh-spawn compose box (no spinner) must NOT be classified working")
+	}
+	if !ClaudeIdlePromptShowing(freshSpawn) {
+		t.Errorf("fresh-spawn compose box with ⏵⏵ footer must be recognized idle")
+	}
+
+	// Even an ellipsis-only box (no prefilled text) with the footer is idle.
+	ellipsisOnly := "────────────\n❯ …\n────────────\n  ⏵⏵ accept edits on\n"
+	if ClaudeActivelyWorking(ellipsisOnly) {
+		t.Fatalf("ellipsis-only compose box must NOT be working")
+	}
+	if !ClaudeIdlePromptShowing(ellipsisOnly) {
+		t.Errorf("ellipsis-only compose box with ⏵⏵ footer must be recognized idle")
+	}
+
+	// The SAME compose box WITH an active spinner must classify working — the
+	// footer is permanent chrome and must never override active work.
+	working := "✻ Sautéing… (ctrl+c to interrupt · 12s · thinking)\n" +
+		"────────────\n" +
+		"❯ \n" +
+		"────────────\n" +
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+	if !ClaudeActivelyWorking(working) {
+		t.Errorf("compose box with active spinner must be classified working")
+	}
+}

@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/state"
 	"github.com/Dicklesworthstone/ntm/internal/status"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -842,6 +843,24 @@ func IsLiveBusy(scrollback string, agentType string) bool {
 	if scrollback == "" {
 		return false
 	}
+
+	// Claude panes: defer to the ordering-aware classifier instead of a
+	// position-blind CategoryThinking match. Claude pins its input box to the
+	// bottom and renders the live spinner just above it; when a turn ends it
+	// REPLACES the spinner with a completion line ("✻ Churned for 6s") but a
+	// STALE spinner ("· Thundering… (4s)") can still sit ABOVE that completion
+	// line within the live window. A bare CategoryThinking match would see the
+	// stale spinner and report busy — overriding the correct idle verdict — so
+	// the dispatcher sees 0 idle agents after every burst and the swarm stalls
+	// with ready work waiting. agent.ClaudeActivelyWorking checks the relative
+	// ORDER of the most-recent spinner vs. the most-recent turn-ended marker and
+	// is the single source of truth for Claude liveness; routing Claude through
+	// it keeps IsLiveBusy in agreement with the rest of the Claude detection
+	// layer (parser, status, ClaudeIdlePromptShowing).
+	if normalizeAgentType(agentType) == "claude" {
+		return agent.ClaudeActivelyWorking(scrollback)
+	}
+
 	live := lastNLines(scrollback, liveThinkingWindowLines)
 	if live == "" {
 		return false
