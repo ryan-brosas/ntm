@@ -85,7 +85,7 @@ ntm deps -v
 ntm quick api --template=go
 
 # Launch a mixed swarm
-ntm spawn api --cc=2 --cod=1 --gmi=1
+ntm spawn api --cc=2 --cod=1 --agy=1
 
 # Open the live operator surfaces
 ntm dashboard api
@@ -115,7 +115,7 @@ can treat a swarm like a manageable unit instead of a pile of terminals.
 
 ```bash
 ntm quick payments --template=go
-ntm spawn payments --cc=3 --cod=2 --gmi=1
+ntm spawn payments --cc=3 --cod=2 --agy=1
 ntm add payments --cc=1
 ntm list
 ntm status payments
