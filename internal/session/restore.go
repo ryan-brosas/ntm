@@ -166,10 +166,10 @@ func Restore(state *SessionState, opts RestoreOptions) (err error) {
 		}
 	}
 
-	// Apply layout
-	if err := applyLayout(name, state.Layout); err != nil {
-		// Non-fatal - tiled layout will be used
-	}
+	// Restore per-window fidelity: exact geometry, window names, active window,
+	// active pane, and zoom. Falls back to the whole-session layout for states
+	// saved without per-window metadata. All steps are best-effort (non-fatal).
+	restoreWindowFidelity(name, state, panes, tmuxPanes)
 
 	// Check git branch if requested
 	if !opts.SkipGitCheck && state.GitBranch != "" {
@@ -244,8 +244,13 @@ func RestoreAgents(sessionName string, state *SessionState, cmds AgentCommands) 
 			continue
 		}
 
-		// Get agent command based on type
-		agentCmd := getAgentCommand(paneState.AgentType, cmds)
+		// Prefer the pane's pre-rendered command (carries the captured model;
+		// see ntm-boi0), falling back to the type-default command. An empty
+		// result means there is nothing to launch for this pane.
+		agentCmd := paneState.Command
+		if agentCmd == "" {
+			agentCmd = getAgentCommand(paneState.AgentType, cmds)
+		}
 		if agentCmd == "" {
 			continue
 		}
@@ -397,8 +402,13 @@ func Resume(state *SessionState, cmds AgentCommands, opts ResumeOptions) (*Resum
 		}
 
 		if launchCmd == "" {
-			// No captured id (or no resume path) -> fresh agent launch.
-			launchCmd = getAgentCommand(ps.AgentType, cmds)
+			// No captured id (or no resume path) -> fresh agent launch. Prefer
+			// the pane's pre-rendered command (carries the captured model; see
+			// ntm-boi0), falling back to the type-default.
+			launchCmd = ps.Command
+			if launchCmd == "" {
+				launchCmd = getAgentCommand(ps.AgentType, cmds)
+			}
 			rp.Action = "launched"
 		} else {
 			rp.Action = "resumed"
@@ -468,6 +478,115 @@ func getAgentCommand(agentType string, cmds AgentCommands) string {
 		return cmds.Ollama
 	default:
 		return ""
+	}
+}
+
+// windowCreationOrder returns the distinct window indices in the order Restore
+// creates them — i.e. the order they first appear when panes are sorted by
+// (WindowIndex, Index). This matches the sequence of CreateSession/new-window
+// calls, so the k-th entry corresponds to the k-th window tmux assigns.
+func windowCreationOrder(panes []PaneState) []int {
+	var order []int
+	seen := make(map[int]bool, len(panes))
+	for _, p := range panes {
+		if seen[p.WindowIndex] {
+			continue
+		}
+		seen[p.WindowIndex] = true
+		order = append(order, p.WindowIndex)
+	}
+	return order
+}
+
+// restoreWindowFidelity re-applies per-window names, exact geometry, the active
+// pane in each window, window zoom, and the active window. It maps each saved
+// window to the freshly-created tmux window by creation order, and maps saved
+// panes to new panes positionally (panes[i] <-> tmuxPanes[i], the same mapping
+// Restore uses for titles). With no per-window metadata it falls back to the
+// legacy whole-session layout. Every tmux call is best-effort.
+func restoreWindowFidelity(session string, state *SessionState, panes []PaneState, tmuxPanes []tmux.Pane) {
+	if len(state.Windows) == 0 {
+		_ = applyLayout(session, state.Layout)
+		return
+	}
+
+	// Map saved window indices (in creation order) -> new tmux window indices.
+	newOut, err := tmux.DefaultClient.Run("list-windows", "-t", session, "-F", "#{window_index}")
+	if err != nil {
+		_ = applyLayout(session, state.Layout)
+		return
+	}
+	var newWins []string
+	for _, w := range strings.Split(strings.TrimSpace(newOut), "\n") {
+		if w = strings.TrimSpace(w); w != "" {
+			newWins = append(newWins, w)
+		}
+	}
+	savedToNew := make(map[int]string)
+	for i, sIdx := range windowCreationOrder(panes) {
+		if i < len(newWins) {
+			savedToNew[sIdx] = newWins[i]
+		}
+	}
+
+	winByIdx := make(map[int]WindowState, len(state.Windows))
+	for _, w := range state.Windows {
+		winByIdx[w.Index] = w
+	}
+
+	// Apply window name + exact layout per window.
+	for sIdx, newIdx := range savedToNew {
+		w, ok := winByIdx[sIdx]
+		if !ok {
+			continue
+		}
+		target := fmt.Sprintf("%s:%s", session, newIdx)
+		if w.Name != "" {
+			_ = tmux.DefaultClient.RunSilent("rename-window", "-t", target, w.Name)
+		}
+		layout := w.Layout
+		if layout == "" {
+			layout = state.Layout
+		}
+		if layout != "" {
+			_ = tmux.DefaultClient.RunSilent("select-layout", "-t", target, layout)
+		}
+	}
+
+	// Restore the active pane in each window (and zoom). The active pane is the
+	// per-window #{pane_active}, captured into PaneState.Active.
+	var activeWindowTarget string
+	for i := range panes {
+		if i >= len(tmuxPanes) || !panes[i].Active {
+			continue
+		}
+		paneID := tmuxPanes[i].ID
+		_ = tmux.DefaultClient.RunSilent("select-pane", "-t", paneID)
+		if w, ok := winByIdx[panes[i].WindowIndex]; ok {
+			if w.Zoomed {
+				_ = tmux.DefaultClient.RunSilent("resize-pane", "-Z", "-t", paneID)
+			}
+			if w.Active {
+				if newIdx, ok := savedToNew[panes[i].WindowIndex]; ok {
+					activeWindowTarget = fmt.Sprintf("%s:%s", session, newIdx)
+				}
+			}
+		}
+	}
+
+	// Fallback: select the active window even if its active pane wasn't flagged.
+	if activeWindowTarget == "" {
+		for _, w := range state.Windows {
+			if w.Active {
+				if newIdx, ok := savedToNew[w.Index]; ok {
+					activeWindowTarget = fmt.Sprintf("%s:%s", session, newIdx)
+				}
+				break
+			}
+		}
+	}
+	if activeWindowTarget != "" {
+		_ = tmux.DefaultClient.RunSilent("select-window", "-t", activeWindowTarget)
 	}
 }
 

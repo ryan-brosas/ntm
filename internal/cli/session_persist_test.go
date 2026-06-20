@@ -69,6 +69,60 @@ func TestBuildAgentCommands_NilConfig(t *testing.T) {
 	}
 }
 
+// TestApplyModelCommands_HonorsCapturedModel covers ntm-boi0: resume/restore
+// must relaunch each agent on its captured model, not the account default. The
+// helper renders the pane's model into PaneState.Command (which the session
+// launch path prefers). Panes without a captured model keep Command empty and
+// fall back to the no-model type-default command.
+func TestApplyModelCommands_HonorsCapturedModel(t *testing.T) {
+	prevCfg := cfg
+	cfg = config.Default()
+	t.Cleanup(func() { cfg = prevCfg })
+
+	state := &session.SessionState{
+		Name:    "demo",
+		WorkDir: "/data/projects/demo",
+		Panes: []session.PaneState{
+			{Index: 1, AgentType: "cc", Model: "opus"},
+			{Index: 2, AgentType: "cc"}, // no captured model
+		},
+	}
+	applyModelCommands(state)
+
+	withModel := state.Panes[0].Command
+	if withModel == "" {
+		t.Fatalf("model pane Command is empty; expected a rendered launch command")
+	}
+	if strings.Contains(withModel, "{{") || strings.Contains(withModel, "}}") {
+		t.Errorf("model pane Command still has unrendered template markers: %q", withModel)
+	}
+	if !strings.Contains(withModel, "--model") {
+		t.Errorf("model pane Command missing --model flag: %q", withModel)
+	}
+	if !strings.Contains(withModel, "claude") {
+		t.Errorf("model pane Command missing claude invocation: %q", withModel)
+	}
+	if state.Panes[1].Command != "" {
+		t.Errorf("no-model pane Command should stay empty (type-default fallback), got %q", state.Panes[1].Command)
+	}
+}
+
+// TestApplyModelCommands_NilConfigSafe verifies the helper is a no-op (no panic)
+// when no config is loaded, leaving Command empty so launch falls back cleanly.
+func TestApplyModelCommands_NilConfigSafe(t *testing.T) {
+	prevCfg := cfg
+	cfg = nil
+	t.Cleanup(func() { cfg = prevCfg })
+
+	state := &session.SessionState{
+		Panes: []session.PaneState{{Index: 1, AgentType: "cc", Model: "opus"}},
+	}
+	applyModelCommands(state) // must not panic
+	if state.Panes[0].Command != "" {
+		t.Errorf("nil cfg should leave Command empty, got %q", state.Panes[0].Command)
+	}
+}
+
 // TestRunSessionsShow_LoadFailureRoutesThroughJSONEnvelope covers bd-1yws7:
 // when --json is set, runSessionsShow's session.Load failure path must emit
 // a parseable JSON envelope and propagate errJSONFailure so automation

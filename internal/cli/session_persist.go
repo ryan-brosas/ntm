@@ -4,9 +4,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/output"
 	"github.com/Dicklesworthstone/ntm/internal/session"
@@ -459,6 +462,8 @@ func newSessionsRestoreCmd() *cobra.Command {
 	var attach bool
 	var skipGitCheck bool
 	var launchAgents bool
+	var prompt string
+	var themeName string
 
 	cmd := &cobra.Command{
 		Use:   "restore <saved-name>",
@@ -473,7 +478,8 @@ Examples:
   ntm sessions restore myproject --force      # Overwrite if session exists
   ntm sessions restore myproject --attach     # Attach after restore
   ntm sessions restore myproject --name=new   # Restore as different name
-  ntm sessions restore myproject --launch     # Launch agents in panes`,
+  ntm sessions restore myproject --launch     # Launch agents in panes
+  ntm sessions restore myproject --launch --prompt "pick up the migration"`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			opts := session.RestoreOptions{
@@ -481,7 +487,7 @@ Examples:
 				Force:        force,
 				SkipGitCheck: skipGitCheck,
 			}
-			return runSessionsRestore(args[0], opts, attach, launchAgents)
+			return runSessionsRestore(args[0], opts, attach, launchAgents, prompt, themeName)
 		},
 	}
 
@@ -490,19 +496,23 @@ Examples:
 	cmd.Flags().BoolVarP(&attach, "attach", "a", false, "attach after restore")
 	cmd.Flags().BoolVar(&skipGitCheck, "skip-git-check", false, "don't warn about git branch mismatch")
 	cmd.Flags().BoolVar(&launchAgents, "launch", false, "launch agents in restored panes")
+	cmd.Flags().StringVar(&prompt, "prompt", "", "inject an initial prompt into each agent pane after restore (requires --launch)")
+	cmd.Flags().StringVar(&themeName, "theme", "", "render restore output using the named theme")
 
 	return cmd
 }
 
 // SessionsRestoreResult represents the result of a restore operation.
 type SessionsRestoreResult struct {
-	Success    bool                  `json:"success"`
-	SavedName  string                `json:"saved_name"`
-	RestoredAs string                `json:"restored_as"`
-	State      *session.SessionState `json:"state,omitempty"`
-	AgentCount int                   `json:"agent_count"`
-	Error      string                `json:"error,omitempty"`
-	GitWarning string                `json:"git_warning,omitempty"`
+	Success      bool                  `json:"success"`
+	SavedName    string                `json:"saved_name"`
+	RestoredAs   string                `json:"restored_as"`
+	State        *session.SessionState `json:"state,omitempty"`
+	AgentCount   int                   `json:"agent_count"`
+	PromptSent   int                   `json:"prompt_sent,omitempty"`
+	PromptFailed int                   `json:"prompt_failed,omitempty"`
+	Error        string                `json:"error,omitempty"`
+	GitWarning   string                `json:"git_warning,omitempty"`
 }
 
 func (r *SessionsRestoreResult) Text(w io.Writer) error {
@@ -521,6 +531,13 @@ func (r *SessionsRestoreResult) Text(w io.Writer) error {
 		fmt.Fprintf(w, "  Agents: %d Claude, %d Codex, %d Gemini\n",
 			r.State.Agents.Claude, r.State.Agents.Codex, r.State.Agents.Gemini)
 	}
+	if r.PromptSent > 0 || r.PromptFailed > 0 {
+		fmt.Fprintf(w, "  Prompt injected into %d pane(s)", r.PromptSent)
+		if r.PromptFailed > 0 {
+			fmt.Fprintf(w, " (%d failed)", r.PromptFailed)
+		}
+		fmt.Fprintln(w)
+	}
 	if r.GitWarning != "" {
 		fmt.Fprintf(w, "  %sWarning:%s %s\n", colorize(t.Warning), colorize(t.Text), r.GitWarning)
 	}
@@ -531,7 +548,9 @@ func (r *SessionsRestoreResult) JSON() interface{} {
 	return r
 }
 
-func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, launchAgents bool) error {
+func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, launchAgents bool, prompt, themeName string) error {
+	applyResumeTheme(themeName)
+
 	// bd-oqwmf: emitRestoreFailure writes the success:false envelope and
 	// signals non-zero exit (parity with bd-usgfy).
 	// bd-1yws7: hoisted above the tmux.EnsureInstalled() check so the
@@ -591,25 +610,35 @@ func runSessionsRestore(savedName string, opts session.RestoreOptions, attach, l
 	// Optionally launch agents
 	var launchErr error
 	agentCount := 0
+	promptSent, promptFailed := 0, 0
 	if launchAgents {
 		if cfg != nil {
+			// Render each pane's captured model into its launch command so the
+			// relaunch honors the saved model (ntm-boi0).
+			applyModelCommands(state)
 			// Render the agent command templates before launching: the raw
 			// cfg.Agents.* values are Go templates and must not be sent into a
 			// pane verbatim (a literal `{{memLimitPrefix}} claude ...` would fail
 			// to exec and the agent would never launch).
 			cmds := buildAgentCommands(state)
 			launchErr = session.RestoreAgents(restoredName, state, cmds)
+			// Optionally inject an initial prompt into the launched panes.
+			if launchErr == nil && strings.TrimSpace(prompt) != "" {
+				promptSent, promptFailed = sendResumePrompt(restoredName, prompt)
+			}
 		}
 		agentCount = state.Agents.Total()
 	}
 
 	result := &SessionsRestoreResult{
-		Success:    true,
-		SavedName:  savedName,
-		RestoredAs: restoredName,
-		State:      state,
-		AgentCount: agentCount,
-		GitWarning: gitWarning,
+		Success:      true,
+		SavedName:    savedName,
+		RestoredAs:   restoredName,
+		State:        state,
+		AgentCount:   agentCount,
+		PromptSent:   promptSent,
+		PromptFailed: promptFailed,
+		GitWarning:   gitWarning,
 	}
 
 	if launchErr != nil {
@@ -634,6 +663,8 @@ func newSessionsResumeCmd() *cobra.Command {
 		force      bool
 		attach     bool
 		nativeFlag bool
+		prompt     string
+		themeName  string
 	)
 
 	cmd := &cobra.Command{
@@ -652,10 +683,12 @@ Examples:
   ntm sessions resume myproject            # Resume topology + agents
   ntm sessions resume myproject --force    # Overwrite if session exists
   ntm sessions resume myproject --native   # Use native --resume, skip casr
-  ntm sessions resume myproject --attach    # Attach after resume`,
+  ntm sessions resume myproject --attach    # Attach after resume
+  ntm sessions resume myproject --prompt "continue the refactor"  # Inject a first task
+  ntm sessions resume myproject --theme dracula  # Render output with a theme`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSessionsResume(args[0], name, force, attach, !nativeFlag)
+			return runSessionsResume(args[0], name, force, attach, !nativeFlag, prompt, themeName)
 		},
 	}
 
@@ -663,20 +696,24 @@ Examples:
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "overwrite existing session")
 	cmd.Flags().BoolVarP(&attach, "attach", "a", false, "attach after resume")
 	cmd.Flags().BoolVar(&nativeFlag, "native", false, "use the agent's native --resume instead of casr")
+	cmd.Flags().StringVar(&prompt, "prompt", "", "inject an initial prompt into each agent pane after resume")
+	cmd.Flags().StringVar(&themeName, "theme", "", "render resume output using the named theme")
 
 	return cmd
 }
 
 // SessionsResumeResult reports the outcome of a resume operation.
 type SessionsResumeResult struct {
-	Success   bool                 `json:"success"`
-	SavedName string               `json:"saved_name"`
-	ResumedAs string               `json:"resumed_as"`
-	Resumed   int                  `json:"resumed"`
-	Launched  int                  `json:"launched"`
-	Skipped   int                  `json:"skipped"`
-	Panes     []session.ResumePane `json:"panes,omitempty"`
-	Error     string               `json:"error,omitempty"`
+	Success      bool                 `json:"success"`
+	SavedName    string               `json:"saved_name"`
+	ResumedAs    string               `json:"resumed_as"`
+	Resumed      int                  `json:"resumed"`
+	Launched     int                  `json:"launched"`
+	Skipped      int                  `json:"skipped"`
+	Panes        []session.ResumePane `json:"panes,omitempty"`
+	PromptSent   int                  `json:"prompt_sent,omitempty"`
+	PromptFailed int                  `json:"prompt_failed,omitempty"`
+	Error        string               `json:"error,omitempty"`
 }
 
 func (r *SessionsResumeResult) Text(w io.Writer) error {
@@ -704,6 +741,13 @@ func (r *SessionsResumeResult) Text(w io.Writer) error {
 			idInfo = fmt.Sprintf(" [%s:%s]", p.Provider, p.SessionID)
 		}
 		fmt.Fprintf(w, "  %s [%d] %s (%s)%s\n", marker, p.Index, p.Title, p.Action, idInfo)
+	}
+	if r.PromptSent > 0 || r.PromptFailed > 0 {
+		fmt.Fprintf(w, "  Prompt injected into %d pane(s)", r.PromptSent)
+		if r.PromptFailed > 0 {
+			fmt.Fprintf(w, " (%d failed)", r.PromptFailed)
+		}
+		fmt.Fprintln(w)
 	}
 	return nil
 }
@@ -763,13 +807,120 @@ func buildAgentCommands(state *session.SessionState) session.AgentCommands {
 	}
 }
 
-func runSessionsResume(savedName, name string, force, attach, preferCASR bool) error {
+// applyModelCommands renders each agent pane's launch command with that pane's
+// captured model alias and stores it in PaneState.Command, so resume/restore
+// relaunch the agent on the same model instead of the account default (ntm-boi0).
+// The session-layer launch path prefers PaneState.Command over the type-default.
+// Panes without a captured model are left untouched (Command stays empty) and
+// fall back to the no-model type command. Render failures are non-fatal: the
+// pane keeps its empty Command rather than receiving a broken template string.
+func applyModelCommands(state *session.SessionState) {
+	if cfg == nil || state == nil {
+		return
+	}
+	for i := range state.Panes {
+		ps := &state.Panes[i]
+		modelAlias := strings.TrimSpace(ps.Model)
+		if modelAlias == "" {
+			continue
+		}
+		tmpl, cliType, ok := agentTemplateAndType(ps.AgentType)
+		if !ok || tmpl == "" {
+			continue
+		}
+		v := config.AgentTemplateVars{
+			SessionName:    state.Name,
+			ProjectDir:     state.WorkDir,
+			PaneIndex:      ps.Index,
+			AgentType:      string(cliType),
+			Model:          ResolveModel(cliType, modelAlias),
+			ModelAlias:     modelAlias,
+			ModelRequested: true,
+		}
+		if rendered, err := config.GenerateAgentCommand(tmpl, v); err == nil && rendered != "" {
+			ps.Command = rendered
+		}
+	}
+}
+
+// agentTemplateAndType maps a saved pane's agent-type string to its configured
+// command template and the CLI AgentType used for model resolution. Mirrors the
+// type switch in session.getAgentCommand so model-aware relaunch covers exactly
+// the agent types the fallback launch path supports.
+func agentTemplateAndType(agentType string) (string, AgentType, bool) {
+	if cfg == nil {
+		return "", "", false
+	}
+	switch agent.AgentType(agentType).Canonical() {
+	case tmux.AgentClaude:
+		return cfg.Agents.Claude, AgentTypeClaude, true
+	case tmux.AgentCodex:
+		return cfg.Agents.Codex, AgentTypeCodex, true
+	case tmux.AgentGemini:
+		return cfg.Agents.Gemini, AgentTypeGemini, true
+	case tmux.AgentAntigravity:
+		return cfg.Agents.Antigravity, AgentTypeAntigravity, true
+	case tmux.AgentCursor:
+		return cfg.Agents.Cursor, AgentTypeCursor, true
+	case tmux.AgentWindsurf:
+		return cfg.Agents.Windsurf, AgentTypeWindsurf, true
+	case tmux.AgentAider:
+		return cfg.Agents.Aider, AgentTypeAider, true
+	case tmux.AgentOpencode:
+		return opencodeCommandOrDefault(cfg.Agents.Opencode), AgentTypeOpencode, true
+	case tmux.AgentOllama:
+		return cfg.Agents.Ollama, AgentTypeOllama, true
+	default:
+		return "", "", false
+	}
+}
+
+// applyResumeTheme applies the named theme to this process's rendered output for
+// a resume/restore invocation (ntm-boi0 --theme passthrough). Theme is a display
+// concern (NTM's own coloring) — it does not alter the agent panes themselves.
+func applyResumeTheme(name string) {
+	if name = strings.TrimSpace(name); name == "" {
+		return
+	}
+	theme.ApplyLipGlossDefaults(theme.FromName(name))
+}
+
+// sendResumePrompt injects an initial prompt into each agent pane after a
+// resume/restore relaunch (ntm-boi0 --prompt passthrough). Best-effort: the
+// agents may still be starting, so this mirrors `ntm resume --inject` and a
+// short settle delay precedes delivery. User panes are skipped.
+func sendResumePrompt(sessionName, prompt string) (sent, failed int) {
+	if prompt = strings.TrimSpace(prompt); prompt == "" {
+		return 0, 0
+	}
+	panes, err := tmux.GetPanes(sessionName)
+	if err != nil {
+		return 0, 0
+	}
+	// Give freshly-relaunched agents a moment to accept input before delivery.
+	time.Sleep(750 * time.Millisecond)
+	for _, p := range panes {
+		if p.Type == tmux.AgentUser {
+			continue
+		}
+		if err := sendPromptWithDoubleEnter(p.ID, prompt); err != nil {
+			failed++
+			continue
+		}
+		sent++
+	}
+	return sent, failed
+}
+
+func runSessionsResume(savedName, name string, force, attach, preferCASR bool, prompt, themeName string) error {
 	emitFailure := func(result *SessionsResumeResult) error {
 		if encErr := output.New(output.WithJSON(jsonOutput)).Output(result); encErr != nil {
 			return encErr
 		}
 		return jsonFailureExit()
 	}
+
+	applyResumeTheme(themeName)
 
 	if err := tmux.EnsureInstalled(); err != nil {
 		if jsonOutput {
@@ -782,6 +933,10 @@ func runSessionsResume(savedName, name string, force, attach, preferCASR bool) e
 	if err != nil {
 		return emitFailure(&SessionsResumeResult{Success: false, SavedName: savedName, Error: err.Error()})
 	}
+
+	// Render each pane's captured model into its launch command so fresh
+	// relaunches honor the saved model (ntm-boi0).
+	applyModelCommands(state)
 
 	// Render the agent command templates before launching: the raw cfg.Agents.*
 	// values are Go templates and must not be sent into a pane verbatim.
@@ -804,6 +959,11 @@ func runSessionsResume(savedName, name string, force, attach, preferCASR bool) e
 		Launched:  res.Launched,
 		Skipped:   res.Skipped,
 		Panes:     res.Panes,
+	}
+
+	// Optionally inject an initial prompt into the relaunched agent panes.
+	if strings.TrimSpace(prompt) != "" {
+		result.PromptSent, result.PromptFailed = sendResumePrompt(res.Session, prompt)
 	}
 
 	if err := output.New(output.WithJSON(jsonOutput)).Output(result); err != nil {

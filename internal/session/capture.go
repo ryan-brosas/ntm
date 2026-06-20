@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,8 +64,9 @@ func Capture(sessionName string) (state *SessionState, err error) {
 	// Get git info if in a repo
 	gitBranch, gitRemote, gitCommit := getGitInfo(cwd)
 
-	// Get layout
+	// Get layout (whole-session fallback) and per-window fidelity metadata.
 	layout := getLayout(sessionName)
+	windows := captureWindows(sessionName)
 
 	// Parse session creation time (tmux format varies, try common formats)
 	var createdAt time.Time
@@ -94,11 +96,59 @@ func Capture(sessionName string) (state *SessionState, err error) {
 		Agents:    agents,
 		Panes:     paneStates,
 		Layout:    layout,
+		Windows:   windows,
 		CreatedAt: createdAt,
 		Version:   StateVersion,
 	}
 
 	return state, nil
+}
+
+// captureWindows records per-window metadata (name, exact geometry, active and
+// zoom state) so restore can reproduce the full topology faithfully, not just
+// the active window's layout. Returns nil if the session cannot be listed; the
+// caller then relies on the whole-session Layout fallback.
+func captureWindows(sessionName string) []WindowState {
+	// Use the same printable delimiter as GetPanes: tmux escapes non-printable
+	// bytes (e.g. \x1f) in format output, so a control-char separator would not
+	// survive. Window names/layouts will not contain this token.
+	sep := tmux.FieldSeparator
+	format := "#{window_index}" + sep + "#{window_name}" + sep +
+		"#{window_active}" + sep + "#{window_zoomed_flag}" + sep + "#{window_layout}"
+	output, err := tmux.DefaultClient.Run("list-windows", "-t", sessionName, "-F", format)
+	if err != nil {
+		return nil
+	}
+	return parseWindowList(output, sep)
+}
+
+// parseWindowList parses the sep-delimited `list-windows` output produced by
+// captureWindows into WindowState records. Split out as a pure function so the
+// parsing is unit-testable without a live tmux server. Lines that are blank,
+// under-delimited, or carry a non-numeric window index are skipped.
+func parseWindowList(output, sep string) []WindowState {
+	var windows []WindowState
+	for _, line := range strings.Split(strings.TrimSpace(output), "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.SplitN(line, sep, 5)
+		if len(fields) < 5 {
+			continue
+		}
+		idx, err := strconv.Atoi(strings.TrimSpace(fields[0]))
+		if err != nil {
+			continue
+		}
+		windows = append(windows, WindowState{
+			Index:  idx,
+			Name:   fields[1],
+			Active: strings.TrimSpace(fields[2]) == "1",
+			Zoomed: strings.TrimSpace(fields[3]) == "1",
+			Layout: strings.TrimSpace(fields[4]),
+		})
+	}
+	return windows
 }
 
 // countAgents counts agents by type from pane list.
