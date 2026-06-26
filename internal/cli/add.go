@@ -226,11 +226,7 @@ func newAddCmd() *cobra.Command {
 	pluginsDir := pluginAgentsDirForArgs(os.Args[1:])
 	loadedPlugins, _ := plugins.LoadAgentPlugins(pluginsDir)
 	for _, p := range loadedPlugins {
-		agentType := AgentType(p.Name)
-		cmd.Flags().Var(NewAgentSpecsValue(agentType, &agentSpecs), p.Name, p.Description)
-		if p.Alias != "" {
-			cmd.Flags().Var(NewAgentSpecsValue(agentType, &agentSpecs), p.Alias, p.Description+" (alias)")
-		}
+		registerPluginAgentFlags(cmd, p, &agentSpecs)
 	}
 
 	return cmd

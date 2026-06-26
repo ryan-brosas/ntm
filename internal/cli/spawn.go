@@ -1448,15 +1448,45 @@ Examples:
 	// Register plugin flags dynamically
 	// Note: We scan for plugins here to register flags.
 	for _, p := range loadedPlugins {
-		// Use p.Name as the AgentType so we can identify it later
-		agentType := AgentType(p.Name)
-		cmd.Flags().Var(NewAgentSpecsValue(agentType, &agentSpecs), p.Name, p.Description)
-		if p.Alias != "" {
-			cmd.Flags().Var(NewAgentSpecsValue(agentType, &agentSpecs), p.Alias, p.Description+" (alias)")
-		}
+		registerPluginAgentFlags(cmd, p, &agentSpecs)
 	}
 
 	return cmd
+}
+
+// registerPluginAgentFlags registers a plugin's --<name> (and optional
+// --<alias>) agent-spec flags on cmd, skipping any that would collide with a
+// flag that is already defined.
+//
+// Without this guard a user-installed agent plugin whose name or alias matches
+// a built-in agent flag makes pflag panic with "flag redefined: <name>" while
+// the command tree is constructed at process startup. The most common trigger
+// is a leftover "oc" (Opencode) plugin from before Opencode became a
+// first-class agent type: the static --oc flag and the plugin's --oc flag
+// collide. Because the command tree is built in init(), that panic crashes
+// *every* ntm invocation, not just `spawn`/`add` — and in particular it makes
+// `ntm update` roll back, since the freshly installed binary aborts during
+// post-install verification (see #200).
+//
+// Built-ins win: when a plugin name/alias already exists as a flag we keep the
+// built-in and drop the colliding plugin flag with a warning rather than
+// panicking.
+func registerPluginAgentFlags(cmd *cobra.Command, p plugins.AgentPlugin, specs *AgentSpecs) {
+	agentType := AgentType(p.Name)
+	if cmd.Flags().Lookup(p.Name) == nil {
+		cmd.Flags().Var(NewAgentSpecsValue(agentType, specs), p.Name, p.Description)
+	} else {
+		slog.Warn("skipping agent plugin flag that collides with an existing flag; keeping built-in",
+			"plugin", p.Name, "flag", "--"+p.Name)
+	}
+	if p.Alias != "" {
+		if cmd.Flags().Lookup(p.Alias) == nil {
+			cmd.Flags().Var(NewAgentSpecsValue(agentType, specs), p.Alias, p.Description+" (alias)")
+		} else {
+			slog.Warn("skipping agent plugin alias that collides with an existing flag; keeping built-in",
+				"plugin", p.Name, "alias", "--"+p.Alias)
+		}
+	}
 }
 
 // spawnSessionLogic handles the creation of the session and spawning of agents
