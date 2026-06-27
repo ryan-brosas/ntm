@@ -140,9 +140,15 @@ func launchOverlayPopup(session, bindKey string, attentionCursor int64, inferred
 
 	if runErr != nil {
 		if captured != "" {
-			// Strip the inner cobra "Error: " prefix so the top-level handler
-			// doesn't print a doubled "Error: ... Error: ...".
-			return fmt.Errorf("dashboard overlay failed: %s", strings.TrimPrefix(captured, "Error: "))
+			// The inner ntm may print warning lines (e.g. "project directory
+			// does not exist") before cobra's terminal "Error: <cause>" line.
+			// Surface the cause as the wrapped error (no doubled "Error: ...")
+			// and re-emit any warnings separately so neither is lost nor buried.
+			warnings, cause := splitOverlayStderr(captured)
+			if warnings != "" {
+				fmt.Fprintln(os.Stderr, warnings)
+			}
+			return fmt.Errorf("dashboard overlay failed: %s", cause)
 		}
 		return fmt.Errorf("dashboard overlay failed: %w", runErr)
 	}
@@ -157,7 +163,11 @@ func launchOverlayPopup(session, bindKey string, attentionCursor int64, inferred
 }
 
 func overlayPopupInnerCommand(ntmBin, session string, attentionCursor int64, inferred bool) string {
-	innerCmd := fmt.Sprintf("NTM_POPUP=1 '%s' dashboard --popup", ntmBin)
+	// Single-quote both the binary path and the session for the /bin/sh -c line
+	// tmux runs. For ordinary (quote-free) values this is byte-identical to the
+	// previous '%s' formatting; it additionally survives a binary path or session
+	// name containing a single quote.
+	innerCmd := fmt.Sprintf("NTM_POPUP=1 %s dashboard --popup", shellSingleQuote(ntmBin))
 	if inferred {
 		// Preserve the lenient current-session resolution across the relaunch:
 		// without this marker the explicit session arg appended below would
@@ -168,11 +178,37 @@ func overlayPopupInnerCommand(ntmBin, session string, attentionCursor int64, inf
 	if attentionCursor > 0 {
 		innerCmd += fmt.Sprintf(" --attention-cursor %d", attentionCursor)
 	}
-	return innerCmd + fmt.Sprintf(" '%s'", session)
+	return innerCmd + " " + shellSingleQuote(session)
 }
 
 // shellSingleQuote single-quotes s for safe use inside the /bin/sh -c command
 // line that tmux display-popup runs, escaping any embedded single quotes.
 func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+}
+
+// splitOverlayStderr separates captured inner-ntm stderr into leading warning
+// text and the terminal error cause. The inner process may print warnings
+// before cobra's final "Error: <cause>" line; we take the LAST "Error: "-prefixed
+// line as the cause (stripped) and return everything else as warnings. If no
+// "Error: " line is present, the whole text is treated as the cause.
+func splitOverlayStderr(captured string) (warnings, cause string) {
+	lines := strings.Split(captured, "\n")
+	errIdx := -1
+	for i, ln := range lines {
+		if strings.HasPrefix(strings.TrimSpace(ln), "Error: ") {
+			errIdx = i
+		}
+	}
+	if errIdx < 0 {
+		return "", captured
+	}
+	cause = strings.TrimPrefix(strings.TrimSpace(lines[errIdx]), "Error: ")
+	rest := make([]string, 0, len(lines)-1)
+	for i, ln := range lines {
+		if i != errIdx {
+			rest = append(rest, ln)
+		}
+	}
+	return strings.TrimSpace(strings.Join(rest, "\n")), cause
 }

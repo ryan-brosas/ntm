@@ -355,7 +355,10 @@ func showBinding(key string) error {
 }
 
 // isOverlayKeyBound checks if the given key already has an NTM overlay binding
-// in tmux.conf. Returns true if found.
+// in tmux.conf in its CURRENT form. Returns false when the binding is absent OR
+// when it is a stale pre-#201 binding (missing --inferred); in the stale case
+// the auto-setup path then replaces it in place (via isBindingLine), migrating
+// it to the lenient current-session resolution.
 func isOverlayKeyBound(key string) bool {
 	tmuxConf := filepath.Join(os.Getenv("HOME"), ".tmux.conf")
 	data, err := os.ReadFile(tmuxConf)
@@ -370,10 +373,18 @@ func isOverlayKeyBound(key string) bool {
 	return false
 }
 
+// isOverlayBindingLine reports whether line is an ntm overlay binding for key in
+// its CURRENT form. It requires the "--inferred" marker so a stale pre-#201
+// overlay binding (which lacks it) is reported as NOT current — that makes
+// isOverlayKeyBound return false and triggers setupOverlayBinding to replace the
+// old line in place (found via the broader isBindingLine), so existing F12
+// bindings are migrated to the fixed lenient resolution instead of silently
+// failing closed for unregistered sessions.
 func isOverlayBindingLine(line, key string) bool {
 	return isBindingLine(line, key) &&
 		strings.Contains(line, "display-popup") &&
-		strings.Contains(line, "dashboard --popup")
+		strings.Contains(line, "dashboard --popup") &&
+		strings.Contains(line, "--inferred")
 }
 
 // isBindingLine checks if a line is a tmux binding for the given key.
