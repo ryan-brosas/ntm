@@ -204,6 +204,46 @@ func TestGitTokenAttributionPerPane(t *testing.T) {
 	}
 }
 
+func TestGitTokenAttributionPrefixCollision(t *testing.T) {
+	// Regression for the substring over-match bug: `git --grep` is a CONTAINS
+	// match, so a short pane token ("…/0.1") is a substring of a denser sibling's
+	// ("…/0.10"). The reader must require an EXACT token line; otherwise pane 0.1
+	// is miscredited pane 0.10's commits — and, worst case, an unstamped but
+	// genuinely-working pane 0.1 reads as source="token" + stale and trips a
+	// false wedge tell. This test fails against a substring-only reader.
+	dir := initTempRepo(t)
+	now := time.Now()
+	token1 := PaneWorkToken("sess", 0, 1)   // "NTM-Pane: sess/0.1"
+	token10 := PaneWorkToken("sess", 0, 10) // "NTM-Pane: sess/0.10" — token1 ⊂ token10
+
+	// Only pane 0.10 is stamped (twice).
+	commitWithTrailer(t, dir, "pane 10 work 1", token10, now.Add(-10*time.Minute))
+	commitWithTrailer(t, dir, "pane 10 work 2", token10, now.Add(-2*time.Minute))
+
+	// DANGEROUS DIRECTION: pane 0.1 was never stamped → it must get ZERO
+	// attribution, never the sibling's commits, never source="token".
+	one := gatherGitTokenActivity(dir, token1, 30*time.Minute, now)
+	if one.anyTokenCommit || one.commitsInWindow != 0 || one.lastCommitAt != nil {
+		t.Fatalf("pane 0.1 must NOT be credited pane 0.10's commits, got %+v", one)
+	}
+
+	// Pane 0.10 gets exactly its own two commits.
+	ten := gatherGitTokenActivity(dir, token10, 30*time.Minute, now)
+	if ten.commitsInWindow != 2 || !ten.anyTokenCommit {
+		t.Fatalf("pane 0.10: commits=%d any=%v, want 2/true", ten.commitsInWindow, ten.anyTokenCommit)
+	}
+
+	// Stamp pane 0.1 once: it gets exactly its own, and 0.10 is unaffected.
+	commitWithTrailer(t, dir, "pane 1 work", token1, now.Add(-1*time.Minute))
+	one = gatherGitTokenActivity(dir, token1, 30*time.Minute, now)
+	if one.commitsInWindow != 1 || !one.anyTokenCommit {
+		t.Fatalf("pane 0.1 after its own commit: commits=%d any=%v, want 1/true", one.commitsInWindow, one.anyTokenCommit)
+	}
+	if ten = gatherGitTokenActivity(dir, token10, 30*time.Minute, now); ten.commitsInWindow != 2 {
+		t.Fatalf("pane 0.10 must remain 2 (not credited pane 0.1's commit), got %d", ten.commitsInWindow)
+	}
+}
+
 func TestGitTokenWindowExcludesStale(t *testing.T) {
 	dir := initTempRepo(t)
 	now := time.Now()

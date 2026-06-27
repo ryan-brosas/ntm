@@ -208,9 +208,19 @@ func buildSemanticProgress(token string, window time.Duration, velocityPositive 
 }
 
 // gatherGitTokenActivity runs a single bounded `git log --grep` keyed by the
-// pane token across all refs. It attributes commits BY TOKEN, so a sibling
-// pane's commits in the same shared repo are never counted. Any error (not a
-// git repo, git missing, timeout) degrades to "no activity" — never a wedge.
+// pane token across all refs and attributes commits BY EXACT TOKEN LINE, so a
+// sibling pane's commits in the same shared repo are never counted. Any error
+// (not a git repo, git missing, timeout) degrades to "no activity" — never a
+// wedge.
+//
+// IMPORTANT: `git --grep` is a substring (contains) match, and one pane's token
+// is a prefix of a denser sibling's ("NTM-Pane: s/0.1" ⊂ "NTM-Pane: s/0.10").
+// So --grep is only a cheap PREFILTER; every candidate is then confirmed by
+// requiring the token to appear as its own trimmed line in the commit body
+// (commitBodyHasTokenLine). Without this confirmation a dense window (panes 1
+// and 10..19) would miscredit siblings — and worse, an unstamped but
+// genuinely-working pane could read as source="token" + stale and trip a false
+// wedge tell, the exact failure the design forbids.
 func gatherGitTokenActivity(repoDir, token string, window time.Duration, now time.Time) gitTokenActivity {
 	var out gitTokenActivity
 	if strings.TrimSpace(repoDir) == "" {
@@ -222,27 +232,38 @@ func gatherGitTokenActivity(repoDir, token string, window time.Duration, now tim
 
 	// -F: treat the token as a literal (it contains '.', '/'), not a regex.
 	// --all: attribute the pane's commits regardless of which branch they land
-	// on. -n caps the scan. %cI is the strict-ISO committer date.
+	// on. -n caps the scan. -z NUL-terminates each commit so multi-line bodies
+	// parse unambiguously; %cI is the strict-ISO committer date and %B the raw
+	// body, joined by a unit separator (%x1f) that cannot occur in the date.
 	cmd := exec.CommandContext(ctx, "git", "-C", repoDir,
 		"log", "--all", "-F", "--grep="+token,
-		fmt.Sprintf("-n%d", semanticGitLogCap), "--format=%cI")
+		fmt.Sprintf("-n%d", semanticGitLogCap), "-z", "--format=%cI%x1f%B")
 	raw, err := cmd.Output()
 	if err != nil {
 		return out
 	}
 
 	cutoff := now.Add(-window)
-	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
+	// Records are NUL-separated (git -z) and newest-first.
+	for _, record := range strings.Split(string(raw), "\x00") {
+		if strings.TrimSpace(record) == "" {
 			continue
 		}
-		ts, perr := time.Parse(time.RFC3339, line)
+		date, body, ok := strings.Cut(record, "\x1f")
+		if !ok {
+			continue
+		}
+		// Exact-line confirmation: reject prefilter substring hits where the
+		// token is only a prefix of a sibling pane's token line.
+		if !commitBodyHasTokenLine(body, token) {
+			continue
+		}
+		ts, perr := time.Parse(time.RFC3339, strings.TrimSpace(date))
 		if perr != nil {
 			continue
 		}
 		out.anyTokenCommit = true
-		// Lines are newest-first; record the first (most recent) as last commit.
+		// First confirmed record is the most recent → last commit.
 		if out.lastCommitAt == nil {
 			t := ts
 			out.lastCommitAt = &t
@@ -252,6 +273,21 @@ func gatherGitTokenActivity(repoDir, token string, window time.Duration, now tim
 		}
 	}
 	return out
+}
+
+// commitBodyHasTokenLine reports whether any trimmed line of the commit body
+// equals the pane token exactly. The pane work-token is emitted as its own
+// commit-trailer line ("NTM-Pane: <session>/<window>.<pane>"), so an exact
+// full-line match attributes a commit to exactly one pane and never to a
+// prefix-colliding sibling. The comparison is literal string equality, so it is
+// injection-safe regardless of session/window/pane naming.
+func commitBodyHasTokenLine(body, token string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == token {
+			return true
+		}
+	}
+	return false
 }
 
 // gatherClaimActivity is a bounded, best-effort bead read keyed by the pane
