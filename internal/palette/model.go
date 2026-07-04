@@ -38,6 +38,7 @@ const (
 	PhaseEdit // edit prompt text before sending
 	PhaseXFSearch
 	PhaseXFResults
+	PhaseSelectAgents // granular per-agent multi-select (#205)
 )
 
 // Target represents the send target
@@ -49,6 +50,7 @@ const (
 	TargetCodex
 	TargetGemini
 	TargetAntigravity
+	TargetSelected // explicit per-pane selection (#205)
 )
 
 // ReloadMsg is emitted when palette commands are reloaded from config changes.
@@ -127,6 +129,10 @@ type Model struct {
 	editInput textarea.Model
 	editDraft string // non-empty when user has modified the prompt
 
+	// composeCmd backs the synthetic "Custom message" selection so m.selected can
+	// point at a stable address when composing free text from scratch (#206).
+	composeCmd config.PaletteCmd
+
 	// XF search state
 	xfQuery     textinput.Model
 	xfResults   []tools.XFSearchResult
@@ -148,6 +154,17 @@ type Model struct {
 
 	// Viewport for scrollable command list
 	listViewport viewport.Model
+
+	// listContentLines is the number of rendered lines in the command list.
+	// Used to size the list box to its content instead of a fixed oversized
+	// height that fills the whole popup (#204).
+	listContentLines int
+
+	// Granular per-agent selection state (#205). Populated when the user opens
+	// the "Select agents" sub-dialog from the target phase.
+	agentPanes   []tmux.Pane     // agent panes (excludes the user pane)
+	agentCursor  int             // cursor position within agentPanes
+	agentChecked map[string]bool // pane ID -> selected for send
 }
 
 // KeyMap defines the keybindings
@@ -167,6 +184,7 @@ type KeyMap struct {
 	TogglePin      key.Binding
 	ToggleFavorite key.Binding
 	XFSearch       key.Binding
+	Compose        key.Binding
 	Target1        key.Binding
 	Target2        key.Binding
 	Target3        key.Binding
@@ -246,6 +264,10 @@ var keys = KeyMap{
 		key.WithKeys("ctrl+k"),
 		key.WithHelp("ctrl+k", "xf search"),
 	),
+	Compose: key.NewBinding(
+		key.WithKeys("ctrl+n"),
+		key.WithHelp("ctrl+n", "custom message"),
+	),
 	Target1: key.NewBinding(key.WithKeys("1")),
 	Target2: key.NewBinding(key.WithKeys("2")),
 	Target3: key.NewBinding(key.WithKeys("3")),
@@ -279,6 +301,12 @@ type Options struct {
 func New(session string, commands []config.PaletteCmd) Model {
 	return NewWithOptions(session, commands, Options{})
 }
+
+// customMessageKey is the reserved key for the synthetic "Custom message"
+// selection that lets the user compose a free-text prompt from scratch (#206)
+// instead of only sending pre-baked commands. It is never stored in the command
+// list; it is created on demand when the user presses the compose shortcut.
+const customMessageKey = "custom-message"
 
 // NewWithOptions creates a new palette model with optional persisted state wiring.
 func NewWithOptions(session string, commands []config.PaletteCmd, opts Options) Model {
@@ -499,11 +527,25 @@ func (m Model) commandPhaseLayout() (listWidth, previewWidth int, showSplitView 
 }
 
 func (m Model) commandListBoxHeight() int {
-	listBoxHeight := m.height - 14
-	if listBoxHeight < 5 {
-		listBoxHeight = 5
+	// Maximum height the list box may occupy given surrounding chrome (header,
+	// filter, help bar). This is the scroll ceiling for long command lists.
+	maxHeight := m.height - 14
+	if maxHeight < 5 {
+		maxHeight = 5
 	}
-	return listBoxHeight
+
+	// Fit the box to its content so a short list renders a compact dialog
+	// instead of a fixed, oversized box that fills the whole popup (#204).
+	// The viewport is (box height - 2) tall, so a box of contentLines+2 shows
+	// every line with no wasted space; taller lists are capped and scroll.
+	fit := m.listContentLines + 2
+	if fit < 5 {
+		fit = 5
+	}
+	if fit > maxHeight {
+		return maxHeight
+	}
+	return fit
 }
 
 func (m *Model) syncListViewport() {
@@ -512,12 +554,18 @@ func (m *Model) syncListViewport() {
 	}
 
 	listWidth, _, _ := m.commandPhaseLayout()
-	listBoxHeight := m.commandListBoxHeight()
 
 	viewportWidth := listWidth - 6
 	if viewportWidth < 1 {
 		viewportWidth = 1
 	}
+
+	// Render the list first so we know how many lines it occupies, then size the
+	// box to that content (capped) rather than to the full terminal height (#204).
+	content := m.renderCommandList(max(viewportWidth+2, 1))
+	m.listContentLines = strings.Count(content, "\n") + 1
+
+	listBoxHeight := m.commandListBoxHeight()
 	viewportHeight := listBoxHeight - 2
 	if viewportHeight < 1 {
 		viewportHeight = 1
@@ -525,7 +573,7 @@ func (m *Model) syncListViewport() {
 
 	m.listViewport.Width = viewportWidth
 	m.listViewport.Height = viewportHeight
-	m.listViewport.SetContent(m.renderCommandList(max(viewportWidth+2, 1)))
+	m.listViewport.SetContent(content)
 	m.ensureCursorVisible()
 }
 
@@ -651,6 +699,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateCommandPhase(msg)
 		case PhaseTarget:
 			return m.updateTargetPhase(msg)
+		case PhaseSelectAgents:
+			return m.updateSelectAgentsPhase(msg)
 		case PhaseEdit:
 			return m.updateEditPhase(msg)
 		case PhaseXFSearch:
@@ -837,6 +887,16 @@ func (m *Model) updateCommandPhase(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.enterXFSearch()
 		return *m, nil
 
+	case key.Matches(msg, keys.Compose):
+		// Compose a free-text message from scratch (#206) without needing to pick
+		// a pre-baked command first. Uses a synthetic selection with an empty
+		// prompt and jumps straight into the editor.
+		m.composeCmd = config.PaletteCmd{Key: customMessageKey, Label: "Custom message", Prompt: ""}
+		m.selected = &m.composeCmd
+		m.editDraft = ""
+		editCmd := m.enterEditPhase()
+		return *m, editCmd
+
 	case key.Matches(msg, keys.Select):
 		if len(m.filtered) > 0 {
 			cmd := m.filtered[m.cursor]
@@ -946,6 +1006,93 @@ func (m *Model) updateTargetPhase(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, keys.Target5):
 		m.target = TargetAntigravity
 		return m.send()
+
+	case key.Matches(msg, keys.Num6):
+		return m.enterSelectAgentsPhase()
+	}
+
+	return *m, nil
+}
+
+// enterSelectAgentsPhase loads the current agent panes and opens the granular
+// per-agent multi-select dialog (#205). All agents start checked so the user
+// can quickly deselect the few they want to exclude.
+func (m *Model) enterSelectAgentsPhase() (tea.Model, tea.Cmd) {
+	panes, err := tmux.GetPanes(m.session)
+	if err != nil {
+		m.err = err
+		return *m, tea.Quit
+	}
+
+	agents := make([]tmux.Pane, 0, len(panes))
+	for _, p := range panes {
+		if p.Type == tmux.AgentUser {
+			continue
+		}
+		agents = append(agents, p)
+	}
+
+	m.agentPanes = agents
+	m.agentCursor = 0
+	m.agentChecked = make(map[string]bool, len(agents))
+	for _, p := range agents {
+		m.agentChecked[p.ID] = true
+	}
+	m.phase = PhaseSelectAgents
+	return *m, nil
+}
+
+// updateSelectAgentsPhase handles key events in the granular agent selector.
+func (m *Model) updateSelectAgentsPhase(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, keys.Back):
+		m.phase = PhaseTarget
+		return *m, nil
+
+	case key.Matches(msg, keys.Quit):
+		m.quitting = true
+		return *m, tea.Quit
+
+	case key.Matches(msg, keys.Up):
+		if m.agentCursor > 0 {
+			m.agentCursor--
+		}
+		return *m, nil
+
+	case key.Matches(msg, keys.Down):
+		if m.agentCursor < len(m.agentPanes)-1 {
+			m.agentCursor++
+		}
+		return *m, nil
+
+	case msg.String() == " ":
+		if m.agentCursor >= 0 && m.agentCursor < len(m.agentPanes) {
+			id := m.agentPanes[m.agentCursor].ID
+			m.agentChecked[id] = !m.agentChecked[id]
+		}
+		return *m, nil
+
+	case msg.String() == "a":
+		for _, p := range m.agentPanes {
+			m.agentChecked[p.ID] = true
+		}
+		return *m, nil
+
+	case msg.String() == "n":
+		for _, p := range m.agentPanes {
+			m.agentChecked[p.ID] = false
+		}
+		return *m, nil
+
+	case key.Matches(msg, keys.Select):
+		// Only send if at least one pane is checked; otherwise stay put.
+		for _, p := range m.agentPanes {
+			if m.agentChecked[p.ID] {
+				m.target = TargetSelected
+				return m.send()
+			}
+		}
+		return *m, nil
 	}
 
 	return *m, nil
@@ -963,6 +1110,9 @@ func (m *Model) enterEditPhase() tea.Cmd {
 
 	ta := textarea.New()
 	ta.SetValue(prompt)
+	if strings.TrimSpace(prompt) == "" {
+		ta.Placeholder = "Type your custom message…"
+	}
 	ta.ShowLineNumbers = false
 	ta.CharLimit = 0
 
@@ -1030,9 +1180,9 @@ func (m *Model) reconcileSelectionAfterReload() {
 		return
 	}
 
-	// XF results are ephemeral selections rather than config-backed palette items.
-	// Keep them stable across palette config reloads.
-	if m.selected.Key == "xf-result" {
+	// XF results and free-text compose selections are ephemeral rather than
+	// config-backed palette items. Keep them stable across palette config reloads.
+	if m.selected.Key == "xf-result" || m.selected.Key == customMessageKey {
 		return
 	}
 
@@ -1308,6 +1458,9 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 			shouldSend = p.Type == tmux.AgentGemini
 		case TargetAntigravity:
 			shouldSend = p.Type == tmux.AgentAntigravity
+		case TargetSelected:
+			// Explicit per-pane selection (#205): send only to checked agent panes.
+			shouldSend = p.Type != tmux.AgentUser && m.agentChecked[p.ID]
 		}
 
 		if shouldSend {
@@ -1435,6 +1588,8 @@ func (m Model) View() string {
 		return m.viewCommandPhase()
 	case PhaseTarget:
 		return m.viewTargetPhase()
+	case PhaseSelectAgents:
+		return m.viewSelectAgentsPhase()
 	case PhaseEdit:
 		return m.viewEditPhase()
 	case PhaseXFSearch:
@@ -1478,6 +1633,10 @@ func (m Model) viewQuitting() string {
 			targetName = "Antigravity"
 			targetColor = string(t.Lavender)
 			targetIcon = ic.Gemini
+		case TargetSelected:
+			targetName = "selected agents"
+			targetColor = string(t.Mauve)
+			targetIcon = ic.Target
 		}
 
 		checkStyle := lipgloss.NewStyle().Foreground(t.Success).Bold(true)
@@ -1596,7 +1755,9 @@ func (m Model) viewCommandPhase() string {
 	// ═══════════════════════════════════════════════════════════════
 	b.WriteString("  " + m.renderHelpBar() + "\n")
 
-	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, b.String())
+	// Center the (now content-sized) palette vertically so it reads as a compact
+	// floating dialog instead of a block anchored to the top edge (#204).
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Center, b.String())
 }
 
 func (m Model) renderCommandList(width int) string {
@@ -2046,6 +2207,7 @@ func (m Model) renderHelpBar() string {
 		{"↑/↓", "navigate"},
 		{"1-9", "quick select"},
 		{"Enter", "select"},
+		{"ctrl+n", "custom msg"},
 		{"Esc", "back"},
 	}
 
@@ -2166,6 +2328,7 @@ func (m Model) viewTargetPhase() string {
 		{"3", ic.Codex, "Codex (cod)", "OpenAI agents", t.Codex, t.Surface0},
 		{"4", ic.Gemini, "Gemini (gmi)", "Google agents (legacy)", t.Gemini, t.Surface0},
 		{"5", ic.Gemini, "Antigravity (agy)", "Google agents", t.Lavender, t.Surface0},
+		{"6", ic.Target, "Select agents…", "pick specific panes", t.Mauve, t.Surface0},
 	}
 
 	for _, target := range targets {
@@ -2183,6 +2346,8 @@ func (m Model) viewTargetPhase() string {
 				countSuffix = fmt.Sprintf(" (%d)", m.paneCounts.gemini)
 			case "5":
 				countSuffix = fmt.Sprintf(" (%d)", m.paneCounts.antigravity)
+			case "6":
+				countSuffix = fmt.Sprintf(" (%d)", m.paneCounts.totalAgents)
 			}
 		}
 
@@ -2263,7 +2428,9 @@ func (m Model) viewTargetPhase() string {
 	// Help bar
 	b.WriteString("  " + m.renderTargetHelpBar() + "\n")
 
-	return b.String()
+	// Center the compact target picker so it reads as a floating dialog rather
+	// than a block pinned to the top-left of the popup (#204).
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Center, b.String())
 }
 
 func (m Model) renderTargetHelpBar() string {
@@ -2283,10 +2450,146 @@ func (m Model) renderTargetHelpBar() string {
 		desc string
 	}{
 		{"1-5", "select target"},
+		{"6", "pick agents"},
 		{"e", "edit prompt"},
 		{"?", "help"},
 		{"Esc", "back"},
 		{"q", "quit"},
+	}
+
+	var parts []string
+	for _, item := range items {
+		parts = append(parts, keyStyle.Render(item.key)+" "+descStyle.Render(item.desc))
+	}
+
+	return strings.Join(parts, "  ")
+}
+
+// viewSelectAgentsPhase renders the granular per-agent multi-select dialog (#205).
+func (m Model) viewSelectAgentsPhase() string {
+	t := m.theme
+	ic := m.icons
+
+	var b strings.Builder
+
+	// Responsive box width, mirroring the target phase.
+	layoutMode := styles.GetLayoutMode(m.width)
+	var boxWidth int
+	switch layoutMode {
+	case styles.LayoutUltraWide:
+		boxWidth = 80
+	case styles.LayoutSpacious:
+		boxWidth = 70
+	case styles.LayoutDefault:
+		boxWidth = 60
+	default:
+		boxWidth = m.width - 10
+		if boxWidth < 40 {
+			boxWidth = 40
+		}
+	}
+
+	b.WriteString("\n")
+
+	titleText := ic.Target + "  Select Agents"
+	animatedTitle := styles.Shimmer(titleText, m.animTick, string(t.Blue), string(t.Mauve), string(t.Pink))
+	b.WriteString("  " + animatedTitle + "\n")
+	b.WriteString("  " + styles.GradientDivider(boxWidth, string(t.Blue), string(t.Mauve)) + "\n\n")
+
+	// Selected command info (with edited marker).
+	dimStyle := lipgloss.NewStyle().Foreground(t.Subtext)
+	cmdBadge := lipgloss.NewStyle().
+		Background(t.Surface0).
+		Foreground(t.Text).
+		Padding(0, 1).
+		Render(m.selected.Label)
+	if m.editDraft != "" {
+		editedBadge := lipgloss.NewStyle().Foreground(t.Yellow).Italic(true).Render("(edited)")
+		b.WriteString("  " + dimStyle.Render("Sending:") + " " + cmdBadge + " " + editedBadge + "\n\n")
+	} else {
+		b.WriteString("  " + dimStyle.Render("Sending:") + " " + cmdBadge + "\n\n")
+	}
+
+	if len(m.agentPanes) == 0 {
+		b.WriteString("  " + dimStyle.Render("No agent panes in this session.") + "\n\n")
+		b.WriteString("  " + styles.GradientDivider(boxWidth, string(t.Surface2), string(t.Surface1)) + "\n\n")
+		b.WriteString("  " + m.renderSelectAgentsHelpBar() + "\n")
+		return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Center, b.String())
+	}
+
+	checkStyle := lipgloss.NewStyle().Foreground(t.Green).Bold(true)
+	uncheckStyle := lipgloss.NewStyle().Foreground(t.Overlay)
+	labelStyle := lipgloss.NewStyle().Foreground(t.Text)
+	typeStyle := lipgloss.NewStyle().Foreground(t.Subtext).Italic(true)
+	selectedCount := 0
+
+	for i, p := range m.agentPanes {
+		checked := m.agentChecked[p.ID]
+		if checked {
+			selectedCount++
+		}
+
+		// Cursor pointer.
+		pointer := "  "
+		if i == m.agentCursor {
+			pointer = styles.Shimmer(ic.Pointer, m.animTick, string(t.Pink), string(t.Mauve)) + " "
+		}
+
+		box := uncheckStyle.Render("[ ]")
+		if checked {
+			box = checkStyle.Render("[x]")
+		}
+
+		title := strings.TrimSpace(p.Title)
+		if title == "" {
+			title = fmt.Sprintf("pane %d", p.Index)
+		}
+		nameBudget := boxWidth - 20
+		if nameBudget < 10 {
+			nameBudget = 10
+		}
+		title = layout.TruncateWidthDefault(title, nameBudget)
+
+		line := fmt.Sprintf("  %s%s  %s %s",
+			pointer,
+			box,
+			labelStyle.Render(title),
+			typeStyle.Render("("+p.Type.String()+")"))
+		b.WriteString(line + "\n")
+	}
+
+	b.WriteString("\n")
+	countStyle := lipgloss.NewStyle().Foreground(t.Subtext)
+	b.WriteString("  " + countStyle.Render(fmt.Sprintf("%d of %d selected", selectedCount, len(m.agentPanes))) + "\n\n")
+
+	b.WriteString("  " + styles.GradientDivider(boxWidth, string(t.Surface2), string(t.Surface1)) + "\n\n")
+	b.WriteString("  " + m.renderSelectAgentsHelpBar() + "\n")
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Center, b.String())
+}
+
+func (m Model) renderSelectAgentsHelpBar() string {
+	t := m.theme
+
+	keyStyle := lipgloss.NewStyle().
+		Background(t.Surface0).
+		Foreground(t.Text).
+		Bold(true).
+		Padding(0, 1)
+
+	descStyle := lipgloss.NewStyle().
+		Foreground(t.Overlay)
+
+	items := []struct {
+		key  string
+		desc string
+	}{
+		{"↑/↓", "move"},
+		{"space", "toggle"},
+		{"a", "all"},
+		{"n", "none"},
+		{"Enter", "send"},
+		{"Esc", "back"},
 	}
 
 	var parts []string

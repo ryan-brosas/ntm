@@ -78,13 +78,15 @@ Examples:
 func setupBinding(key string) error {
 	t := theme.Current()
 
-	// The binding command
-	bindCmd := fmt.Sprintf(`bind-key -n %s display-popup -E -w 90%% -h 90%% "ntm palette"`, key)
+	// The binding command. The palette is a compact dialog (content-sized list +
+	// short target/agent pickers), so it uses a smaller popup than the full
+	// dashboard overlay to avoid blocking most of the screen behind it (#204).
+	bindCmd := fmt.Sprintf(`bind-key -n %s display-popup -E -w 80%% -h 70%% "ntm palette"`, key)
 
 	// Apply to current tmux server (if running)
 	inTmux := os.Getenv("TMUX") != ""
 	if inTmux {
-		cmd := exec.Command(tmux.BinaryPath(), "bind-key", "-n", key, "display-popup", "-E", "-w", "90%", "-h", "90%", "ntm palette")
+		cmd := exec.Command(tmux.BinaryPath(), "bind-key", "-n", key, "display-popup", "-E", "-w", "80%", "-h", "70%", "ntm palette")
 		if err := cmd.Run(); err != nil {
 			fmt.Printf("%s⚠%s Could not bind in current session: %v\n", colorize(t.Warning), colorize(t.Text), err)
 		} else {
