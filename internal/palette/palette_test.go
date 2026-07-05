@@ -1238,6 +1238,46 @@ func TestComposeCustomMessageShortcut(t *testing.T) {
 	}
 }
 
+// TestSendRefusesEmptyMessage guards the #206 regression: a compose (or an
+// edited-to-empty command) confirmed with nothing typed must NOT be dispatched.
+// send() would otherwise fire a double-Enter with no text at every target pane,
+// submitting whatever half-typed input already sits in each agent's prompt.
+func TestSendRefusesEmptyMessage(t *testing.T) {
+	m := New("test-session", testCommands)
+
+	// Enter the compose flow (empty prompt) and confirm without typing.
+	newModel, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlN})
+	m = newModel.(Model)
+	newModel, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlS}) // ConfirmEdit with empty draft
+	m = newModel.(Model)
+	if m.phase != PhaseTarget {
+		t.Fatalf("expected PhaseTarget after confirming, got %v", m.phase)
+	}
+
+	// Attempt to send. It must refuse: bounce back to the editor with a notice,
+	// and NOT mark the message as sent (no tmux dispatch).
+	model, _ := m.send()
+	m = model.(Model)
+	if m.sent {
+		t.Fatalf("empty message must not be sent")
+	}
+	if m.phase != PhaseEdit {
+		t.Fatalf("expected send() to bounce empty message back to PhaseEdit, got %v", m.phase)
+	}
+	if strings.TrimSpace(m.editNotice) == "" {
+		t.Fatalf("expected an editNotice explaining the empty message was refused")
+	}
+
+	// A whitespace-only draft is likewise refused.
+	m.editDraft = "   \n\t "
+	m.phase = PhaseTarget
+	model, _ = m.send()
+	m = model.(Model)
+	if m.sent || m.phase != PhaseEdit {
+		t.Fatalf("whitespace-only message must be refused too (sent=%v phase=%v)", m.sent, m.phase)
+	}
+}
+
 // --- #205: granular per-agent multi-select ---
 
 func newAgentSelectModel() Model {

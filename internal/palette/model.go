@@ -128,6 +128,9 @@ type Model struct {
 	// Edit phase state
 	editInput textarea.Model
 	editDraft string // non-empty when user has modified the prompt
+	// editNotice, when set, is shown in the edit phase (e.g. after refusing to
+	// send an empty message). Cleared each time the editor is (re)entered.
+	editNotice string
 
 	// composeCmd backs the synthetic "Custom message" selection so m.selected can
 	// point at a stable address when composing free text from scratch (#206).
@@ -1103,6 +1106,8 @@ func (m *Model) enterEditPhase() tea.Cmd {
 	if m.selected == nil {
 		return nil
 	}
+	// Clear any stale notice; the send() empty-guard re-sets it after this call.
+	m.editNotice = ""
 	prompt := m.selected.Prompt
 	if m.editDraft != "" {
 		prompt = m.editDraft
@@ -1428,6 +1433,22 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 		return *m, nil
 	}
 
+	prompt := m.selected.Prompt
+	if m.editDraft != "" {
+		prompt = m.editDraft
+	}
+	// Never dispatch an empty/whitespace message, and check this BEFORE touching
+	// tmux. The double-Enter submission protocol sends no text but two Enters,
+	// which would submit whatever half-typed input already sits in each target
+	// agent's prompt (or a blank line) across every selected pane. Reachable via
+	// the ctrl+n compose flow (#206) confirmed with nothing typed, or a pre-baked
+	// command edited to empty. Bounce back to the editor instead of sending.
+	if strings.TrimSpace(prompt) == "" {
+		editCmd := m.enterEditPhase()
+		m.editNotice = "Message is empty — type something to send, or Esc to cancel."
+		return *m, editCmd
+	}
+
 	panes, err := tmux.GetPanes(m.session)
 	if err != nil {
 		m.err = err
@@ -1435,10 +1456,6 @@ func (m *Model) send() (tea.Model, tea.Cmd) {
 		return *m, tea.Quit
 	}
 
-	prompt := m.selected.Prompt
-	if m.editDraft != "" {
-		prompt = m.editDraft
-	}
 	count := 0
 	var targetPanes []int
 	var targetAgentTypes []string
@@ -2626,6 +2643,11 @@ func (m Model) viewEditPhase() string {
 		Padding(0, 1).
 		Render(m.selected.Label)
 	b.WriteString("  " + dimStyle.Render("Editing:") + " " + cmdBadge + "\n\n")
+
+	if m.editNotice != "" {
+		noticeStyle := lipgloss.NewStyle().Foreground(t.Peach)
+		b.WriteString("  " + noticeStyle.Render(ic.Warning+"  "+m.editNotice) + "\n\n")
+	}
 
 	b.WriteString("  " + m.editInput.View() + "\n\n")
 
