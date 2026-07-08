@@ -1,6 +1,8 @@
 package agents
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -416,6 +418,60 @@ func TestParseAgentType(t *testing.T) {
 				t.Errorf("ParseAgentType(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestLoadPlugins(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pi.toml"), []byte(`
+[agent]
+name = "pi"
+alias = "pia"
+command = "pi --approve"
+description = "Pi"
+
+[agent.defaults]
+model = ""
+`), 0o644); err != nil {
+		t.Fatalf("write pi.toml: %v", err)
+	}
+
+	pm := NewProfileMatcher()
+	baseline := len(pm.AllProfiles()) // built-ins only
+
+	n := pm.LoadPlugins(dir)
+	if n != 1 {
+		t.Fatalf("LoadPlugins returned %d, want 1", n)
+	}
+
+	// Plugin profile is registered under its canonical name.
+	pi := pm.GetProfileByName("pi")
+	if pi == nil || string(pi.Type) != "pi" {
+		t.Fatalf("GetProfileByName(pi) = %+v, want type pi", pi)
+	}
+	if pi.ContextBudget != models.GetTokenBudget("pi") {
+		t.Errorf("pi context budget = %d, want %d", pi.ContextBudget, models.GetTokenBudget("pi"))
+	}
+	if len(pi.Specializations) == 0 {
+		t.Error("pi should have generic specializations")
+	}
+
+	// Alias resolves to the canonical plugin profile.
+	if got := pm.GetProfileByName("pia"); got == nil || string(got.Type) != "pi" {
+		t.Errorf("GetProfileByName(pia) = %+v, want type pi", got)
+	}
+
+	// AllProfiles must not duplicate the alias (canonical entry only).
+	if len(pm.AllProfiles()) != baseline+1 {
+		t.Errorf("after LoadPlugins, AllProfiles len = %d, want %d", len(pm.AllProfiles()), baseline+1)
+	}
+
+	// Missing dir is not an error and loads nothing.
+	pm2 := NewProfileMatcher()
+	if n2 := pm2.LoadPlugins(filepath.Join(dir, "does-not-exist")); n2 != 0 {
+		t.Errorf("LoadPlugins on missing dir returned %d, want 0", n2)
 	}
 }
 

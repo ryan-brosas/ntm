@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/bv"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/handoff"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/pressure"
 	"github.com/Dicklesworthstone/ntm/internal/recovery"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
@@ -31,21 +33,22 @@ var promptPatterns = []*regexp.Regexp{
 // SpawnOptions configures the robot-spawn operation.
 type SpawnOptions struct {
 	Session        string
-	Label          string   // Session label — constructs "{Session}--{Label}" if set
-	CCCount        int      // Claude agents
-	CodCount       int      // Codex agents
-	GmiCount       int      // Gemini agents
-	AgyCount       int      // Antigravity agents
-	Preset         string   // Recipe/preset name
-	NoUserPane     bool     // Don't create user pane
-	WorkingDir     string   // Override working directory
-	WaitReady      bool     // Wait for agents to be ready
-	ReadyTimeout   int      // Timeout in seconds for ready detection
-	DryRun         bool     // Preview mode: show what would happen without executing
-	Safety         bool     // Fail if session already exists
-	AssignWork     bool     // Enable orchestrator work assignment mode
-	AssignStrategy string   // Assignment strategy: top-n, diverse, dependency-aware, skill-matched
-	CustomNames    []string // Custom agent names (used in order, then NATO alphabet)
+	Label          string         // Session label — constructs "{Session}--{Label}" if set
+	CCCount        int            // Claude agents
+	CodCount       int            // Codex agents
+	GmiCount       int            // Gemini agents
+	AgyCount       int            // Antigravity agents
+	PluginCounts   map[string]int // Plugin-defined agent counts (canonical plugin name -> count, e.g. "pi" -> 2), mirroring --spawn-<plugin> flags
+	Preset         string         // Recipe/preset name
+	NoUserPane     bool           // Don't create user pane
+	WorkingDir     string         // Override working directory
+	WaitReady      bool           // Wait for agents to be ready
+	ReadyTimeout   int            // Timeout in seconds for ready detection
+	DryRun         bool           // Preview mode: show what would happen without executing
+	Safety         bool           // Fail if session already exists
+	AssignWork     bool           // Enable orchestrator work assignment mode
+	AssignStrategy string         // Assignment strategy: top-n, diverse, dependency-aware, skill-matched
+	CustomNames    []string       // Custom agent names (used in order, then NATO alphabet)
 }
 
 // SpawnOutput is the structured output for --robot-spawn.
@@ -214,7 +217,7 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	_ = audit.LogEvent(opts.Session, audit.EventTypeSpawn, audit.ActorSystem, "robot.spawn", map[string]interface{}{
 		"phase":           "start",
 		"session":         opts.Session,
-		"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount,
+		"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + pluginTotalAgents(opts),
 		"preset":          opts.Preset,
 		"no_user_pane":    opts.NoUserPane,
 		"dry_run":         opts.DryRun,
@@ -232,7 +235,7 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 		payload := map[string]interface{}{
 			"phase":           "finish",
 			"session":         opts.Session,
-			"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount,
+			"total_agents":    opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + pluginTotalAgents(opts),
 			"preset":          opts.Preset,
 			"no_user_pane":    opts.NoUserPane,
 			"dry_run":         opts.DryRun,
@@ -299,9 +302,9 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 	// handoffCtx is available for use in work prompts below
 	_ = handoffCtx // silence unused warning when not in orchestrator mode
 
-	totalAgents := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount
+	totalAgents := opts.CCCount + opts.CodCount + opts.GmiCount + opts.AgyCount + pluginTotalAgents(opts)
 	if totalAgents == 0 {
-		output.Error = "no agents specified (use cc, cod, gmi, or agy counts)"
+		output.Error = "no agents specified (use cc, cod, gmi, or agy counts, or a registered agent plugin such as --spawn-pi)"
 		output.RobotResponse = NewErrorResponse(fmt.Errorf("%s", output.Error), ErrCodeInvalidFlag, "Specify at least one agent count")
 		return output, nil
 	}
@@ -393,6 +396,21 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 				Title: fmt.Sprintf("%s__agy_%d", opts.Session, i+1),
 			})
 			paneIdx++
+		}
+
+		// Plugin-defined agents (e.g. pi/pia) — dry-run preview, mirroring the
+		// built-in agent loops above so --spawn-<plugin> panes appear in the plan.
+		for _, name := range sortedPluginSpawnNames(opts) {
+			for i := 0; i < opts.PluginCounts[name]; i++ {
+				pluginPane := fmt.Sprintf("0.%d", paneIdx)
+				output.WouldCreate = append(output.WouldCreate, SpawnedAgent{
+					Pane:  pluginPane,
+					Name:  dryRunNameMap.AssignNew(name, pluginPane),
+					Type:  name,
+					Title: fmt.Sprintf("%s__%s_%d", opts.Session, name, i+1),
+				})
+				paneIdx++
+			}
 		}
 
 		output.Layout = "tiled"
@@ -515,6 +533,23 @@ func GetSpawn(opts SpawnOptions, cfg *config.Config) (*SpawnOutput, error) {
 		agent.Name = nameMap.AssignNew("antigravity", agent.Pane)
 		output.Agents = append(output.Agents, agent)
 		agentNum++
+	}
+
+	// Launch plugin-defined agents (e.g. pi/pia), mirroring the built-in loops.
+	// The launch command is the plugin's expanded command template (e.g.
+	// `pi --approve`) so the pane runs non-interactively; falling back to the bare
+	// alias only when the plugin can no longer be resolved at launch time.
+	for _, name := range sortedPluginSpawnNames(opts) {
+		pluginCmd := pluginAgentSpawnCommand(name)
+		if strings.TrimSpace(pluginCmd) == "" {
+			pluginCmd = name
+		}
+		for i := 0; i < opts.PluginCounts[name] && agentNum < len(panes); i++ {
+			agent := launchAgent(panes[agentNum], opts.Session, name, i+1, dir, pluginCmd)
+			agent.Name = nameMap.AssignNew(name, agent.Pane)
+			output.Agents = append(output.Agents, agent)
+			agentNum++
+		}
 	}
 
 	// Wait for agents to be ready if requested
@@ -709,6 +744,53 @@ func agentTypeShort(agentType string) string {
 	default:
 		return strings.TrimSpace(agentType)
 	}
+}
+
+// pluginTotalAgents returns the total number of plugin-defined agents in opts.
+func pluginTotalAgents(opts SpawnOptions) int {
+	n := 0
+	for _, c := range opts.PluginCounts {
+		n += c
+	}
+	return n
+}
+
+// sortedPluginSpawnNames returns the canonical plugin names in opts.PluginCounts
+// in deterministic sorted order, skipping zero/negative counts so the pane
+// assignment and launch order are stable across runs.
+func sortedPluginSpawnNames(opts SpawnOptions) []string {
+	names := make([]string, 0, len(opts.PluginCounts))
+	for name, c := range opts.PluginCounts {
+		if c > 0 {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// pluginAgentSpawnCommand resolves and renders the launch command for a
+// plugin-defined agent type (e.g. "pi") from the agent-plugin registry,
+// expanding its command template with empty vars so a plugin pane launches with
+// the full command (e.g. `pi --approve`) rather than the bare alias — mirroring
+// the spawn/add/controller plugin dispatch. Returns "" when the plugin is not
+// resolvable, in which case the caller falls back to the bare alias.
+func pluginAgentSpawnCommand(agentType string) string {
+	return pluginAgentSpawnCommandFromDir(agentType, pluginsAgentDir())
+}
+
+// pluginAgentSpawnCommandFromDir is the dir-injectable core of
+// pluginAgentSpawnCommand, separated so the template expansion is unit-testable
+// with a temp agents dir (no dependency on the user's ~/.config/ntm/agents).
+func pluginAgentSpawnCommandFromDir(agentType, agentsDir string) string {
+	_, cmdTemplate, ok := plugins.ResolveAgentCommand(agentType, agentsDir)
+	if !ok {
+		return ""
+	}
+	if rendered, err := config.GenerateAgentCommand(cmdTemplate, config.AgentTemplateVars{AgentType: agentType}); err == nil {
+		return rendered
+	}
+	return ""
 }
 
 // getAgentCommands returns the commands to launch each agent type.

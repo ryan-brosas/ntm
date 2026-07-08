@@ -211,6 +211,13 @@ func canonicalSpawnAgentType(raw string) (AgentType, bool) {
 	case agentpkg.AgentTypeOllama:
 		return AgentTypeOllama, true
 	default:
+		// Not a built-in type — fall back to the agent-plugin registry (e.g.
+		// "pi"/"pia") so recipes can carry plugin-defined agent types through
+		// to a real spawn, mirroring the controller/restart plugin fallback.
+		agentsDir := filepath.Join(selectedConfigDir(), "agents")
+		if name, _, ok := plugins.ResolveAgentCommand(raw, agentsDir); ok {
+			return AgentType(name), true
+		}
 		return "", false
 	}
 }

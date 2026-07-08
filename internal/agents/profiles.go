@@ -12,6 +12,7 @@ import (
 
 	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/models"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 )
 
 // AgentType represents the type of AI coding agent.
@@ -68,16 +69,63 @@ type Performance struct {
 // ProfileMatcher matches tasks to the best available agents based on capabilities.
 type ProfileMatcher struct {
 	profiles map[AgentType]*AgentProfile
-	mu       sync.RWMutex
+	// aliases maps a plugin alias (e.g. "pia") to its canonical plugin agent
+	// type (e.g. "pi") so GetProfileByName resolves aliases without polluting
+	// AllProfiles with duplicate entries.
+	aliases map[string]AgentType
+	mu      sync.RWMutex
 }
 
 // NewProfileMatcher creates a new ProfileMatcher with default profiles.
 func NewProfileMatcher() *ProfileMatcher {
 	pm := &ProfileMatcher{
 		profiles: make(map[AgentType]*AgentProfile),
+		aliases:  make(map[string]AgentType),
 	}
 	pm.loadDefaults()
 	return pm
+}
+
+// LoadPlugins merges agent-plugin profiles from dir (e.g.
+// ~/.config/ntm/agents/*.toml) into the matcher so plugin-defined agent types
+// (such as "pi"/"pia") are first-class profiles for `ntm agents` list/show,
+// mirroring the spawn/add/controller plugin dispatch. Each plugin gets a
+// generic capability profile (the plugin TOML carries no capability data);
+// its Model comes from the plugin's [defaults].model and its context budget
+// from models.GetTokenBudget. A missing/empty dir is not an error and returns
+// 0. This is opt-in (not called from NewProfileMatcher) so the matcher's
+// default construction stays filesystem-free and deterministic for tests.
+// Returns the number of plugin profiles loaded.
+func (pm *ProfileMatcher) LoadPlugins(dir string) int {
+	loaded, err := plugins.LoadAgentPlugins(dir)
+	if err != nil || len(loaded) == 0 {
+		return 0
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	n := 0
+	for _, p := range loaded {
+		if p.Name == "" {
+			continue
+		}
+		pm.profiles[AgentType(p.Name)] = &AgentProfile{
+			Type:          AgentType(p.Name),
+			Model:         p.Defaults.Model,
+			ContextBudget: models.GetTokenBudget(p.Name),
+			Specializations: []Specialization{
+				SpecComplex,
+				SpecQuick,
+				SpecResearch,
+				SpecDocs,
+			},
+			Performance: Performance{SuccessRate: 0},
+		}
+		n++
+		if p.Alias != "" {
+			pm.aliases[p.Alias] = AgentType(p.Name)
+		}
+	}
+	return n
 }
 
 // loadDefaults initializes the default agent profiles.
@@ -174,9 +222,16 @@ func (pm *ProfileMatcher) GetProfile(agentType AgentType) *AgentProfile {
 	return p.copy()
 }
 
-// GetProfileByName returns the profile for an agent type string.
+// GetProfileByName returns the profile for an agent type string. Plugin
+// aliases (e.g. "pia") resolve to their canonical plugin type (e.g. "pi").
 func (pm *ProfileMatcher) GetProfileByName(name string) *AgentProfile {
 	normalized := NormalizeAgentType(name)
+	pm.mu.RLock()
+	canonical, ok := pm.aliases[normalized]
+	pm.mu.RUnlock()
+	if ok {
+		return pm.GetProfile(canonical)
+	}
 	return pm.GetProfile(AgentType(normalized))
 }
 

@@ -294,6 +294,39 @@ func TestIsPromptLine_AgentTypeFiltering(t *testing.T) {
 	}
 }
 
+// TestIsPromptLine_PluginAgents verifies pi/pia idle detection. pi's TUI input
+// box renders a "> " prompt (pi-tui Input.render uses prompt = "> "), the same
+// indicator Claude Code uses, so the existing generic ">" pattern already detects
+// pi's idle state. pi/pia are registered in knownAgentTypes so a shell "$" prompt
+// — meaning pi has exited/crashed to a shell — is NOT mistaken for an idle
+// agent prompt (mirroring cc/cod/gmi handling).
+func TestIsPromptLine_PluginAgents(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		line      string
+		agentType string
+		expected  bool
+	}{
+		// pi / pia idle input box: the "> " prompt (same as Claude Code).
+		{"> ", "pi", true},
+		{"> ", "pia", true},
+		{">", "pi", true},
+		{"some output here", "pi", false},   // not a prompt
+		{"pi is thinking...", "pia", false}, // not a prompt
+		// pi/pia exited to a shell: a "$" prompt must NOT count as idle.
+		{"user@host:~$ ", "pi", false},
+		{"user@host:~$ ", "pia", false},
+		{"$ ", "pi", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.agentType+"_"+tt.line, func(t *testing.T) {
+			if got := IsPromptLine(tt.line, tt.agentType); got != tt.expected {
+				t.Errorf("IsPromptLine(%q, %q) = %v, want %v", tt.line, tt.agentType, got, tt.expected)
+			}
+		})
+	}
+}
+
 func TestDetectIdleFromOutput_MultipleLines(t *testing.T) {
 	// DetectIdleFromOutput scans up to maxIdleScanLines (12) trailing
 	// non-empty lines for a prompt, then rejects the verdict if an active

@@ -13,6 +13,7 @@ import (
 	"github.com/BurntSushi/toml"
 
 	agentpkg "github.com/Dicklesworthstone/ntm/internal/agent"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 )
 
 // Recipe defines a reusable session configuration preset.
@@ -325,6 +326,14 @@ func normalizeRecipeAgentType(raw string) (string, error) {
 	case agentpkg.AgentTypeOllama:
 		return string(agentpkg.AgentTypeOllama), nil
 	default:
+		// Not a built-in type — check the agent-plugin registry (e.g. the
+		// "pi"/"pia" plugin at ~/.config/ntm/agents/pi.toml) before giving up,
+		// so recipes can reference plugin-defined agent types the same way
+		// `ntm spawn`/`ntm controller` already do.
+		agentsDir := filepath.Join(defaultUserConfigDir(), "agents")
+		if name, _, ok := plugins.ResolveAgentCommand(strings.TrimSpace(raw), agentsDir); ok {
+			return name, nil
+		}
 		return "", fmt.Errorf("unsupported recipe agent type %q", strings.TrimSpace(raw))
 	}
 }

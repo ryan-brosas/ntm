@@ -2,6 +2,8 @@ package robot
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +12,45 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/tests/testutil"
 )
+
+func TestPluginSpawnHelpers(t *testing.T) {
+	t.Parallel()
+
+	opts := SpawnOptions{PluginCounts: map[string]int{"pi": 2, "zzz": 0, "abc": 1}}
+	if got := pluginTotalAgents(opts); got != 3 {
+		t.Errorf("pluginTotalAgents = %d, want 3", got)
+	}
+
+	names := sortedPluginSpawnNames(opts)
+	// zero/negative counts are skipped; remainder is sorted for determinism.
+	if want := []string{"abc", "pi"}; len(names) != len(want) || names[0] != want[0] || names[1] != want[1] {
+		t.Errorf("sortedPluginSpawnNames = %v, want %v", names, want)
+	}
+
+	// Dir-injected command builder expands the plugin's command template so a
+	// plugin pane launches with the full command, not the bare alias.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pi.toml"), []byte(`
+[agent]
+name = "pi"
+alias = "pia"
+command = "pi --approve{{if .Model}} --model {{shellQuote .Model}}{{end}}"
+`), 0o644); err != nil {
+		t.Fatalf("write pi.toml: %v", err)
+	}
+	cmd := pluginAgentSpawnCommandFromDir("pi", dir)
+	if cmd != "pi --approve" {
+		t.Errorf("pluginAgentSpawnCommandFromDir(pi) = %q, want %q", cmd, "pi --approve")
+	}
+	// Alias resolves to the canonical plugin's command.
+	if cmd := pluginAgentSpawnCommandFromDir("pia", dir); cmd != "pi --approve" {
+		t.Errorf("pluginAgentSpawnCommandFromDir(pia) = %q, want %q", cmd, "pi --approve")
+	}
+	// Unknown type -> "" (caller falls back to the bare alias).
+	if cmd := pluginAgentSpawnCommandFromDir("nope", dir); cmd != "" {
+		t.Errorf("pluginAgentSpawnCommandFromDir(nope) = %q, want \"\"", cmd)
+	}
+}
 
 func TestGetSpawnRejectsProjectNameWithLabelSeparator(t *testing.T) {
 
@@ -380,7 +421,7 @@ func TestSpawnOptions_NoAgentsSpecified(t *testing.T) {
 	if resp.Error == "" {
 		t.Error("[E2E-SPAWN] Expected error for no agents specified")
 	}
-	if resp.Error != "no agents specified (use cc, cod, gmi, or agy counts)" {
+	if resp.Error != "no agents specified (use cc, cod, gmi, or agy counts, or a registered agent plugin such as --spawn-pi)" {
 		t.Errorf("[E2E-SPAWN] Unexpected error message: %s", resp.Error)
 	}
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -160,6 +161,17 @@ Examples:
 	return cmd
 }
 
+// newAgentProfileMatcher builds a ProfileMatcher seeded with the built-in
+// agent profiles AND any registered agent plugins (e.g. "pi"/"pia") from the
+// configured agents dir, so `ntm agents` list/show/stats/recommend treat
+// plugin-defined agent types as first-class profiles — mirroring the
+// spawn/add/controller plugin dispatch.
+func newAgentProfileMatcher() *agents.ProfileMatcher {
+	pm := agents.NewProfileMatcher()
+	pm.LoadPlugins(filepath.Join(selectedConfigDir(), "agents"))
+	return pm
+}
+
 // effectiveAgentModel resolves the model an agent of the given profile type
 // will actually be spawned with, honoring active config overrides (the same
 // `cfg.Models.GetModelName(type, "")` chain the spawn launcher uses). It falls
@@ -179,7 +191,7 @@ func effectiveAgentModel(profile *agents.AgentProfile) string {
 
 // runAgentsList displays all agent profiles.
 func runAgentsList() error {
-	pm := agents.NewProfileMatcher()
+	pm := newAgentProfileMatcher()
 	profiles := pm.AllProfiles()
 
 	// Reflect the config-resolved spawn model rather than the baked-in default
@@ -216,7 +228,7 @@ func runAgentsList() error {
 
 // runAgentsShow displays a specific agent profile.
 func runAgentsShow(agentName string) error {
-	pm := agents.NewProfileMatcher()
+	pm := newAgentProfileMatcher()
 	profile := pm.GetProfileByName(agentName)
 
 	if profile == nil {
@@ -270,7 +282,7 @@ func runAgentsShow(agentName string) error {
 
 // runAgentsStats displays performance statistics for all agents.
 func runAgentsStats() error {
-	pm := agents.NewProfileMatcher()
+	pm := newAgentProfileMatcher()
 	stats := pm.GetPerformanceStats()
 
 	if IsJSONOutput() {
@@ -313,7 +325,7 @@ func runAgentsStats() error {
 
 // runAgentsRecommend recommends the best agent for a task.
 func runAgentsRecommend(task agents.TaskInfo) error {
-	pm := agents.NewProfileMatcher()
+	pm := newAgentProfileMatcher()
 
 	// Get scores for all agents
 	type agentScore struct {

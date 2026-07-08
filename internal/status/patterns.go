@@ -144,6 +144,8 @@ var knownAgentTypes = map[string]bool{
 	"windsurf": true,
 	"aider":    true,
 	"ollama":   true,
+	"pi":       true, // Pi (pi-coding-agent) input box uses the "> " prompt (same as Claude)
+	"pia":      true, // pi --approve (auto-approve pi) shares pi's "> " input prompt
 }
 
 // knownAgentPromptPrefixes matches prompts that belong to specific agent types.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1679,6 +1680,7 @@ Shell Integration:
 				CodCount:       robotSpawnCod,
 				GmiCount:       robotSpawnGmi,
 				AgyCount:       robotSpawnAgy,
+				PluginCounts:   buildRobotSpawnPluginCounts(),
 				Preset:         robotSpawnPreset,
 				NoUserPane:     robotSpawnNoUser,
 				WorkingDir:     robotSpawnDir,
@@ -2879,6 +2881,12 @@ var (
 	robotSpawnNames      string // custom agent names (comma-separated)
 	robotSpawnLabel      string // goal label for multi-session support
 
+	// robotSpawnPluginCounts holds the *int backing each dynamically registered
+	// --spawn-<plugin> count flag (canonical plugin name -> pointer). Populated
+	// in init() when agent plugins are scanned for flag registration; consumed by
+	// buildRobotSpawnPluginCounts() when the robot-spawn opts are assembled.
+	robotSpawnPluginCounts map[string]*int
+
 	// Robot-agent-names flag for querying agent name mappings
 	robotAgentNames string // session name for --robot-agent-names
 
@@ -3449,6 +3457,15 @@ func init() {
 	rootCmd.Flags().IntVar(&robotSpawnCod, "spawn-cod", 0, "Codex CLI agents to spawn. Use with --robot-spawn. Example: --spawn-cod=1")
 	rootCmd.Flags().IntVar(&robotSpawnGmi, "spawn-gmi", 0, "Gemini CLI agents to spawn. Use with --robot-spawn. Example: --spawn-gmi=1")
 	rootCmd.Flags().IntVar(&robotSpawnAgy, "spawn-agy", 0, "Antigravity CLI agents to spawn. Use with --robot-spawn. Example: --spawn-agy=1")
+
+	// Dynamically register a --spawn-<plugin> count flag for each agent plugin
+	// (e.g. --spawn-pi=2), mirroring spawn/add's plugin agent flags so robot-mode
+	// can spawn plugin-defined agents. Built-in flags win on collision (#200):
+	// a plugin named e.g. "cc" is skipped rather than panicking pflag.
+	robotSpawnPluginCounts = make(map[string]*int)
+	for _, p := range loadAgentPluginsForFlags() {
+		registerRobotSpawnPluginFlag(p)
+	}
 	rootCmd.Flags().StringVar(&robotSpawnPreset, "spawn-preset", "", "Use recipe preset instead of counts. See --robot-recipes. Example: --spawn-preset=standard")
 	rootCmd.Flags().BoolVar(&robotSpawnNoUser, "spawn-no-user", false, "Skip user pane creation. Optional with --robot-spawn. For headless/automation")
 	rootCmd.Flags().BoolVar(&robotSpawnWait, "spawn-wait", false, "Wait for agents to show ready state before returning. Recommended for automation")
@@ -4511,6 +4528,66 @@ func pluginConfigDirForArgs(args []string) string {
 
 func pluginAgentsDirForArgs(args []string) string {
 	return filepath.Join(filepath.Dir(configPathFromArgs(args)), "agents")
+}
+
+// loadAgentPluginsForFlags returns the agent plugins resolved from the args-
+// aware agents dir (honoring --config), ignoring read errors. Used at command-
+// tree construction time for dynamic flag registration, mirroring spawn.go's
+// eager plugin load.
+func loadAgentPluginsForFlags() []plugins.AgentPlugin {
+	loaded, _ := plugins.LoadAgentPlugins(pluginAgentsDirForArgs(os.Args[1:]))
+	return loaded
+}
+
+// registerRobotSpawnPluginFlag registers --spawn-<plugin> (and --spawn-<alias>)
+// count flags for a plugin on the root command, sharing one *int slot so the
+// name and alias flags both feed the same canonical count. Built-in flags win
+// on collision (#200): a colliding plugin flag is skipped with a warning
+// rather than panicking pflag. The canonical name is the key in
+// robotSpawnPluginCounts.
+func registerRobotSpawnPluginFlag(p plugins.AgentPlugin) {
+	if p.Name == "" {
+		return
+	}
+	slot := new(int)
+	flagName := "spawn-" + p.Name
+	if rootCmd.Flags().Lookup(flagName) == nil {
+		rootCmd.Flags().IntVar(slot, flagName, 0,
+			p.Description+" agents to spawn. Use with --robot-spawn. Example: --"+flagName+"=1")
+		robotSpawnPluginCounts[p.Name] = slot
+	} else {
+		slog.Warn("skipping agent plugin spawn flag that collides with an existing flag; keeping built-in",
+			"plugin", p.Name, "flag", "--"+flagName)
+	}
+	if p.Alias != "" {
+		aliasFlag := "spawn-" + p.Alias
+		if rootCmd.Flags().Lookup(aliasFlag) == nil {
+			rootCmd.Flags().IntVar(slot, aliasFlag, 0,
+				p.Description+" agents to spawn (alias). Use with --robot-spawn.")
+			if _, exists := robotSpawnPluginCounts[p.Name]; !exists {
+				robotSpawnPluginCounts[p.Name] = slot
+			}
+		}
+	}
+}
+
+// buildRobotSpawnPluginCounts materializes the non-zero plugin agent counts
+// collected by registerRobotSpawnPluginFlag into the SpawnOptions.PluginCounts
+// map consumed by robot.GetSpawn.
+func buildRobotSpawnPluginCounts() map[string]int {
+	if len(robotSpawnPluginCounts) == 0 {
+		return nil
+	}
+	counts := make(map[string]int, len(robotSpawnPluginCounts))
+	for name, slot := range robotSpawnPluginCounts {
+		if slot != nil && *slot > 0 {
+			counts[name] = *slot
+		}
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+	return counts
 }
 
 func loadSelectedConfigOrDefault() *config.Config {

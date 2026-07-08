@@ -102,8 +102,9 @@ func ResolveAgentCommand(agentType, agentsDir string) (name, command string, ok 
 var pluginCmdIndexOnce sync.Once
 
 // pluginCmdIndex maps a lowercased match token (plugin name, alias, or the
-// leading binary of its command) to the plugin's canonical name. Used by
-// AgentTypeForCommand for pane-type detection.
+// literal leading portion of its command template — everything before the
+// first {{var}}) to the plugin's canonical name. Used by AgentTypeForCommand
+// for pane-type detection.
 var pluginCmdIndex map[string]string
 
 // defaultAgentsDir returns the agent-plugin directory next to the resolved
@@ -130,20 +131,28 @@ func defaultAgentsDir() string {
 	return filepath.Join(base, "ntm", "agents")
 }
 
-// firstCommandToken returns the lowercased leading binary token of a command
-// template (e.g. "pi" for "pi --approve{{if .Model}} ...").
-func firstCommandToken(command string) string {
+// literalCommandPrefix returns the lowercased literal leading portion of a
+// command template — everything before the first "{{" template var, trimmed.
+// For "pi --approve{{if .Model}} ..." it returns "pi --approve"; for
+// "pi{{if .Model}} ..." it returns "pi". Used to match a running pane's full
+// command (which carries the args, e.g. "pi --approve --model x") so two plugins
+// that share a binary but differ by flags — like `pi` (bare) and `pia`
+// (pi --approve) — can be told apart by the more specific (longer) match.
+func literalCommandPrefix(command string) string {
 	command = strings.TrimSpace(command)
-	for i, r := range command {
-		if r == ' ' || r == '\t' {
-			return strings.ToLower(command[:i])
-		}
+	if i := strings.Index(command, "{{"); i >= 0 {
+		command = command[:i]
 	}
-	return strings.ToLower(command)
+	return strings.ToLower(strings.TrimSpace(command))
 }
 
 // buildPluginCmdIndexFrom builds the command-match index for a given agents dir.
 // Separated from AgentTypeForCommand so it is unit-testable with a temp dir.
+// Each plugin contributes its name, alias, and the literal leading portion of
+// its command template (the part before any {{var}}). The literal command
+// prefix — not just the leading binary token — is what lets detection
+// distinguish plugins that share a binary but differ by flags (e.g. `pi` vs
+// `pia` = pi --approve): their prefixes are "pi" and "pi --approve".
 func buildPluginCmdIndexFrom(dir string) map[string]string {
 	index := make(map[string]string)
 	loaded, _ := LoadAgentPlugins(dir)
@@ -152,7 +161,7 @@ func buildPluginCmdIndexFrom(dir string) map[string]string {
 		if p.Alias != "" {
 			index[strings.ToLower(p.Alias)] = p.Name
 		}
-		if tok := firstCommandToken(p.Command); tok != "" {
+		if tok := literalCommandPrefix(p.Command); tok != "" {
 			index[tok] = p.Name
 		}
 	}
@@ -161,7 +170,10 @@ func buildPluginCmdIndexFrom(dir string) map[string]string {
 
 // matchCommandIndex reports the plugin whose token matches command using the
 // isAgent-style rules (bare equality, "tok " prefix, "/tok" suffix, "/tok " in
-// path). Mirrors detectAgentFromCommand's matching for built-in agents.
+// path). When more than one token matches it returns the LONGEST token's plugin
+// so a more specific command prefix wins over a shorter one — this is what
+// distinguishes `pi --approve` (pia) from a bare `pi` (pi) when both share the
+// "pi" binary. Mirrors detectAgentFromCommand's matching for built-in agents.
 func matchCommandIndex(index map[string]string, command string) (string, bool) {
 	cmd := strings.ToLower(strings.TrimSpace(command))
 	if cmd == "" {
@@ -170,13 +182,24 @@ func matchCommandIndex(index map[string]string, command string) (string, bool) {
 	if name, ok := index[cmd]; ok {
 		return name, true
 	}
+	// Collect all matching tokens and return the longest (most specific) one
+	// so e.g. "pi --approve" (pia) wins over "pi" (pi) for a pane running
+	// "pi --approve --model x". Deterministic regardless of map iteration order.
+	bestTok := ""
+	bestName := ""
 	for tok, name := range index {
 		if strings.HasPrefix(cmd, tok+" ") ||
 			strings.HasSuffix(cmd, "/"+tok) ||
 			strings.Contains(cmd, "/"+tok+" ") ||
 			strings.Contains(cmd, "/"+tok+"-") {
-			return name, true
+			if len(tok) > len(bestTok) {
+				bestTok = tok
+				bestName = name
+			}
 		}
+	}
+	if bestName != "" {
+		return bestName, true
 	}
 	return "", false
 }
