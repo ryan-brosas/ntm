@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 )
@@ -94,4 +95,95 @@ func ResolveAgentCommand(agentType, agentsDir string) (name, command string, ok 
 		}
 	}
 	return "", "", false
+}
+
+// pluginCmdIndexOnce guards one-time construction of pluginCmdIndex so the
+// pane-type detector does not re-read plugin TOML on every pane parse.
+var pluginCmdIndexOnce sync.Once
+
+// pluginCmdIndex maps a lowercased match token (plugin name, alias, or the
+// leading binary of its command) to the plugin's canonical name. Used by
+// AgentTypeForCommand for pane-type detection.
+var pluginCmdIndex map[string]string
+
+// defaultAgentsDir mirrors config.DefaultPath()'s directory resolution so the
+// low-level tmux pane-type detector can locate agent plugins WITHOUT importing
+// the config package (which would create an import cycle: config imports tmux).
+// Returns the "agents" directory next to the resolved config file.
+func defaultAgentsDir() string {
+	if env := os.Getenv("NTM_CONFIG"); env != "" {
+		return filepath.Join(filepath.Dir(env), "agents")
+	}
+	base := os.Getenv("XDG_CONFIG_HOME")
+	if base == "" {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			base = filepath.Join(home, ".config")
+		}
+	}
+	if base == "" {
+		base = os.TempDir()
+	}
+	return filepath.Join(base, "ntm", "agents")
+}
+
+// firstCommandToken returns the lowercased leading binary token of a command
+// template (e.g. "pi" for "pi --approve{{if .Model}} ...").
+func firstCommandToken(command string) string {
+	command = strings.TrimSpace(command)
+	for i, r := range command {
+		if r == ' ' || r == '\t' {
+			return strings.ToLower(command[:i])
+		}
+	}
+	return strings.ToLower(command)
+}
+
+// buildPluginCmdIndexFrom builds the command-match index for a given agents dir.
+// Separated from AgentTypeForCommand so it is unit-testable with a temp dir.
+func buildPluginCmdIndexFrom(dir string) map[string]string {
+	index := make(map[string]string)
+	loaded, _ := LoadAgentPlugins(dir)
+	for _, p := range loaded {
+		index[strings.ToLower(p.Name)] = p.Name
+		if p.Alias != "" {
+			index[strings.ToLower(p.Alias)] = p.Name
+		}
+		if tok := firstCommandToken(p.Command); tok != "" {
+			index[tok] = p.Name
+		}
+	}
+	return index
+}
+
+// matchCommandIndex reports the plugin whose token matches command using the
+// isAgent-style rules (bare equality, "tok " prefix, "/tok" suffix, "/tok " in
+// path). Mirrors detectAgentFromCommand's matching for built-in agents.
+func matchCommandIndex(index map[string]string, command string) (string, bool) {
+	cmd := strings.ToLower(strings.TrimSpace(command))
+	if cmd == "" {
+		return "", false
+	}
+	if name, ok := index[cmd]; ok {
+		return name, true
+	}
+	for tok, name := range index {
+		if strings.HasPrefix(cmd, tok+" ") ||
+			strings.HasSuffix(cmd, "/"+tok) ||
+			strings.Contains(cmd, "/"+tok+" ") {
+			return name, true
+		}
+	}
+	return "", false
+}
+
+// AgentTypeForCommand reports the plugin whose name, alias, or command binary
+// matches the given pane command, so panes running a plugin agent (e.g. `pi`)
+// classify as the plugin type instead of "user". The index is built once per
+// process from the default agents dir; if a plugin is added mid-process, restart
+// the process (e.g. the monitor) to pick it up.
+func AgentTypeForCommand(command string) (string, bool) {
+	pluginCmdIndexOnce.Do(func() {
+		pluginCmdIndex = buildPluginCmdIndexFrom(defaultAgentsDir())
+	})
+	return matchCommandIndex(pluginCmdIndex, command)
 }

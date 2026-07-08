@@ -372,9 +372,18 @@ func paneShellPID(target string) int {
 // the timeout elapses first.
 func waitForPaneAgentReady(target string, shellPID int, agentType string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	// Plugin agents (registered via an agent plugin, e.g. `pi`) have no shared
+	// content-readiness signature isAgentReady can match; for them a live agent
+	// child process under the shell is the readiness signal — the launch
+	// command was just sent, so a running child means the agent CLI started.
+	// Computed once: reading plugin TOML on every poll would be wasteful.
+	_, _, isPlugin := plugins.ResolveAgentCommand(agentType, pluginsAgentDir())
 	for {
 		ready := false
 		if captured, err := tmux.CapturePaneOutput(target, 50); err == nil && isAgentReady(captured, agentType) {
+			ready = true
+		}
+		if !ready && isPlugin && shellPID > 0 && process.HasChildAlive(shellPID) {
 			ready = true
 		}
 		if ready && shellPID > 0 && !process.HasChildAlive(shellPID) {

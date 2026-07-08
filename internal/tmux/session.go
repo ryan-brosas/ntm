@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Dicklesworthstone/ntm/internal/agent"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 )
 
@@ -195,6 +196,14 @@ func detectAgentFromCommand(command string) AgentType {
 	// Ollama
 	if isAgent("ollama") {
 		return AgentOllama
+	}
+
+	// Plugin-defined agent types: classify a pane running a registered plugin
+	// agent (e.g. `pi`) as the plugin type instead of "user", so type-based
+	// features (restart selection, --type filter, dashboard) treat plugin
+	// agents as first-class. Mirrors the spawn/add plugin dispatch.
+	if name, ok := plugins.AgentTypeForCommand(command); ok {
+		return AgentType(name)
 	}
 
 	return AgentUser
