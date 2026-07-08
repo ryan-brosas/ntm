@@ -76,3 +76,22 @@ func LoadAgentPlugins(dir string) ([]AgentPlugin, error) {
 
 	return plugins, nil
 }
+
+// ResolveAgentCommand looks up an agent type in the plugin registry at
+// agentsDir (by plugin name or alias) and returns the plugin's canonical
+// Name, its Command template, and ok=true. Used by the controller and
+// restart paths so plugin-defined agent types (e.g. "pi"/"pia") are
+// first-class launch targets, mirroring the spawn/add plugin dispatch.
+// Returns ok=false when agentsDir is unreadable or no plugin matches.
+func ResolveAgentCommand(agentType, agentsDir string) (name, command string, ok bool) {
+	loaded, err := LoadAgentPlugins(agentsDir)
+	if err != nil || len(loaded) == 0 {
+		return "", "", false
+	}
+	for _, p := range loaded {
+		if p.Name == agentType || (p.Alias != "" && p.Alias == agentType) {
+			return p.Name, p.Command, true
+		}
+	}
+	return "", "", false
+}

@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -328,6 +330,13 @@ func restartAgentLaunchCommand(cfg *config.Config, agentType string) string {
 		}
 	}
 	if strings.TrimSpace(tmpl) == "" {
+		// Plugin agent types (e.g. "pi"): use the plugin's command template so a
+		// restarted pane keeps `pi --approve --model ...` rather than the bare alias.
+		if _, cmd, ok := plugins.ResolveAgentCommand(agentType, pluginsAgentDir()); ok {
+			tmpl = cmd
+		}
+	}
+	if strings.TrimSpace(tmpl) == "" {
 		return alias
 	}
 
@@ -424,10 +433,23 @@ func selectRestartPaneTargets(panes []tmux.Pane, paneFilterMap map[string]bool, 
 }
 
 func restartPaneAgentType(pane tmux.Pane) string {
-	if resolved := ResolveAgentType(string(pane.Type)); resolved != "" && resolved != "unknown" {
+	raw := strings.TrimSpace(string(pane.Type))
+	if resolved := ResolveAgentType(raw); resolved != "" && resolved != "unknown" {
 		return resolved
 	}
+	// Preserve plugin-defined agent types (e.g. "pi") so a restart keeps the
+	// plugin's launch command instead of collapsing to "unknown".
+	if _, _, ok := plugins.ResolveAgentCommand(raw, pluginsAgentDir()); ok {
+		return raw
+	}
 	return detectAgentType(pane.Title)
+}
+
+// pluginsAgentDir returns the agent-plugin directory used by the restart path.
+// GetRestartPane already loads its config via config.DefaultPath(), so the
+// plugin directory is the sibling "agents" dir next to the config file.
+func pluginsAgentDir() string {
+	return filepath.Join(filepath.Dir(config.DefaultPath()), "agents")
 }
 
 func sendRestartPrompts(targets []restartPromptTarget, prompt string, send func(target, keys string, agentType tmux.AgentType) error) []string {

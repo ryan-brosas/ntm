@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -171,7 +172,7 @@ Custom prompt files support template variables:
 		},
 	}
 
-	cmd.Flags().StringVar(&agentType, "agent-type", "cc", "Agent type: cc, cod, gmi, agy, cursor, windsurf|ws, aider, oc, or ollama")
+	cmd.Flags().StringVar(&agentType, "agent-type", "cc", "Agent type: cc, cod, gmi, agy, cursor, windsurf|ws, aider, oc, or ollama; or any registered agent plugin (e.g. pi, pia)")
 	cmd.Flags().StringVar(&promptFile, "prompt", "", "Custom prompt file (supports template variables)")
 	cmd.Flags().BoolVar(&noPrompt, "no-prompt", false, "Skip sending initial prompt")
 	cmd.ValidArgsFunction = completeSessionArgs
@@ -279,7 +280,15 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 		agentTypeFull = "ollama"
 		agentCmdTemplate = cfg.Agents.Ollama
 	default:
-		return nil, fmt.Errorf("unknown agent type: %s", agentType)
+		// Fall back to the agent plugin registry so plugin-defined agent types
+		// (e.g. "pi"/"pia") can serve as the controller, mirroring the
+		// spawn/add plugin dispatch (see the oc/opencode fallback above, ntm#193).
+		if name, cmd, ok := plugins.ResolveAgentCommand(agentType, filepath.Join(selectedConfigDir(), "agents")); ok {
+			agentTypeFull = name
+			agentCmdTemplate = cmd
+		} else {
+			return nil, fmt.Errorf("unknown agent type: %s", agentType)
+		}
 	}
 
 	dir, err := resolveExplicitProjectDirForSession(session)
