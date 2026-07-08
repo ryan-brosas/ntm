@@ -148,6 +148,12 @@ func FormatTags(tags []string) string {
 	return "[" + strings.Join(tags, ",") + "]"
 }
 
+// resolvePluginAgentType resolves a pane command to a registered agent plugin
+// type. It is a package-level variable so tests can inject a fake resolver
+// instead of depending on the real (cached, default-dir) plugin index. In
+// production it is plugins.AgentTypeForCommand.
+var resolvePluginAgentType = plugins.AgentTypeForCommand
+
 // detectAgentFromCommand attempts to identify the agent type from the process command.
 // This is a fallback when the pane title doesn't match the NTM format (e.g., when
 // shell prompts or tmux hooks change the title dynamically).
@@ -202,7 +208,7 @@ func detectAgentFromCommand(command string) AgentType {
 	// agent (e.g. `pi`) as the plugin type instead of "user", so type-based
 	// features (restart selection, --type filter, dashboard) treat plugin
 	// agents as first-class. Mirrors the spawn/add plugin dispatch.
-	if name, ok := plugins.AgentTypeForCommand(command); ok {
+	if name, ok := resolvePluginAgentType(command); ok {
 		return AgentType(name)
 	}
 

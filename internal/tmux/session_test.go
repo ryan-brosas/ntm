@@ -1187,6 +1187,60 @@ func TestDetectAgentFromCommandEdgeCases(t *testing.T) {
 	}
 }
 
+// TestDetectAgentFromCommandPluginFallback verifies the plugin-agent fallback
+// wiring in detectAgentFromCommand: a pane running a registered plugin agent
+// (e.g. `pi`) classifies as the plugin type instead of "user", built-in agents
+// still take precedence, and unknown commands still fall back to "user".
+// Not t.Parallel: it overrides the package-level resolvePluginAgentType.
+// Sequential tests run before parallel ones, so the parallel
+// TestDetectAgentFromCommandEdgeCases always sees the original resolver.
+// Path/prefix/alias matching rules belong to the plugins package (covered
+// by TestBuildPluginCmdIndexFromAndMatch); here we inject a bare-token fake
+// to exercise only the tmux-layer dispatch.
+func TestDetectAgentFromCommandPluginFallback(t *testing.T) {
+	orig := resolvePluginAgentType
+	defer func() { resolvePluginAgentType = orig }()
+	resolvePluginAgentType = func(command string) (string, bool) {
+		cmd := strings.ToLower(strings.TrimSpace(command))
+		tok := cmd
+		if i := strings.IndexByte(cmd, ' '); i >= 0 {
+			tok = cmd[:i]
+		}
+		switch tok {
+		case "pi":
+			return "pi", true
+		case "myplugin":
+			return "myplugin", true
+		}
+		return "", false
+	}
+
+	tests := []struct {
+		name    string
+		command string
+		want    AgentType
+	}{
+		// Plugin agent: classified as the plugin type, not "user".
+		{"plugin bare", "pi", AgentType("pi")},
+		{"plugin with args", "pi --approve", AgentType("pi")},
+		{"other plugin", "myplugin run", AgentType("myplugin")},
+		// Built-ins still win over the plugin fallback (checked first).
+		{"claude beats plugin", "claude", AgentClaude},
+		{"codex beats plugin", "codex --model x", AgentCodex},
+		// Unknown, not a plugin: user fallback.
+		{"zsh", "zsh", AgentUser},
+		{"bash", "bash", AgentUser},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := detectAgentFromCommand(tt.command)
+			if got != tt.want {
+				t.Errorf("detectAgentFromCommand(%q) = %q, want %q", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
 // Regression test for acfs#267: when an agent runs under a wrapper
 // like Bun, tmux's pane_current_command reports the wrapper, not the
 // agent. We need to identify the wrapper as a candidate for deeper

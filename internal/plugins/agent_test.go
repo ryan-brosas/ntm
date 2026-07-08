@@ -73,11 +73,15 @@ command = "pi --approve"
 		ok   bool
 	}{
 		{"pi", "pi", true},
-		{"pi --approve", "pi", true}, // prefix match
-		{"pia", "pi", true},          // alias
-		{"/usr/bin/pi", "pi", true},  // path suffix
-		{"zsh", "", false},           // unrelated
-		{"pine", "", false},          // no false prefix match
+		{"pi --approve", "pi", true},          // prefix match
+		{"pia", "pi", true},                   // alias
+		{"PI", "pi", true},                    // case-insensitive
+		{"/usr/bin/pi", "pi", true},           // path suffix
+		{"/usr/local/bin/pi-foo", "pi", true}, // "/pi-" contains (mirrors built-in isAgent)
+		{"./pi", "pi", true},                  // relative path suffix
+		{"zsh", "", false},                    // unrelated
+		{"pine", "", false},                   // no false prefix match
+		{"spi-foo", "", false},                // no false contains match
 		{"", "", false},
 	}
 	for _, tt := range tests {

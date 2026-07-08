@@ -106,10 +106,14 @@ var pluginCmdIndexOnce sync.Once
 // AgentTypeForCommand for pane-type detection.
 var pluginCmdIndex map[string]string
 
-// defaultAgentsDir mirrors config.DefaultPath()'s directory resolution so the
-// low-level tmux pane-type detector can locate agent plugins WITHOUT importing
-// the config package (which would create an import cycle: config imports tmux).
-// Returns the "agents" directory next to the resolved config file.
+// defaultAgentsDir returns the agent-plugin directory next to the resolved
+// config file. This intentionally duplicates config.DefaultPath()'s env
+// resolution (NTM_CONFIG / XDG_CONFIG_HOME / home) instead of calling it:
+// plugins cannot import config because the dependency is cyclic TRANSITIVELY
+// (config -> watcher -> agentmail -> tmux -> plugins), even though config
+// does not import tmux directly. Mirroring the ~10 lines of pure env logic
+// here is the standard Go way to break that cycle. Keep in sync with
+// config.DefaultPath if its resolution changes.
 func defaultAgentsDir() string {
 	if env := os.Getenv("NTM_CONFIG"); env != "" {
 		return filepath.Join(filepath.Dir(env), "agents")
@@ -169,7 +173,8 @@ func matchCommandIndex(index map[string]string, command string) (string, bool) {
 	for tok, name := range index {
 		if strings.HasPrefix(cmd, tok+" ") ||
 			strings.HasSuffix(cmd, "/"+tok) ||
-			strings.Contains(cmd, "/"+tok+" ") {
+			strings.Contains(cmd, "/"+tok+" ") ||
+			strings.Contains(cmd, "/"+tok+"-") {
 			return name, true
 		}
 	}
