@@ -22,6 +22,9 @@ func TestAgentTypeToProvider(t *testing.T) {
 		{"gemini", "gemini"},
 		{"gmi", "gemini"},
 		{"google-gemini", "gemini"},
+		{"pi", "pi"},
+		{"pia", "pi"},
+		{"PI", "pi"},
 		{"unknown", "unknown"},
 	}
 

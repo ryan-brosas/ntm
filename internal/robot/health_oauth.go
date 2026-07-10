@@ -269,7 +269,8 @@ func getAgentOAuthHealth(session string, pane tmux.Pane, agentType string) Agent
 
 // agentTypeToProvider maps agent type to provider name.
 func agentTypeToProvider(agentType string) string {
-	switch agent.AgentType(agentType).Canonical() {
+	canon := agent.AgentType(agentType).Canonical()
+	switch canon {
 	case agent.AgentTypeClaudeCode:
 		return "claude"
 	case agent.AgentTypeCodex:
@@ -279,6 +280,15 @@ func agentTypeToProvider(agentType string) string {
 		// provider as the legacy Gemini CLI.
 		return "gemini"
 	default:
+		// Plugin agent types (pi-coding-agent) are not built-in AgentType
+		// constants, so Canonical() passes them through without lowercasing.
+		// Normalize so "pi"/"pia" (and any-case variant) surface as the "pi"
+		// provider rather than "unknown". The provider comes from
+		// ~/.pi/agent/settings.json. See ee477ac5.
+		switch strings.ToLower(string(canon)) {
+		case "pi", "pia":
+			return "pi"
+		}
 		return "unknown"
 	}
 }

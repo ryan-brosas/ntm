@@ -269,3 +269,91 @@ func TestAggregateTokenStats(t *testing.T) {
 		}
 	})
 }
+
+// -----------------------------------------------------------------------------
+// isTrackedAgentType / parseAgentTypes — plugin agent-type (pi/pia) parity (bd-go3mz)
+// -----------------------------------------------------------------------------
+
+func TestIsTrackedAgentTypePiPiaFirstClass(t *testing.T) {
+	tests := []struct {
+		agentType string
+		want      bool
+	}{
+		// Built-ins remain tracked.
+		{"claude", true},
+		{"codex", true},
+		{"gemini", true},
+		{"cursor", true},
+		{"windsurf", true},
+		{"aider", true},
+		{"oc", true},
+		{"ollama", true},
+		// Plugin agent types are first-class.
+		{"pi", true},
+		{"pia", true},
+		// Unknown / arbitrary values are not tracked.
+		{"unknown", false},
+		{"", false},
+		{"hermes", false},
+		{"shell", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.agentType, func(t *testing.T) {
+			if got := isTrackedAgentType(tt.agentType); got != tt.want {
+				t.Errorf("isTrackedAgentType(%q) = %v, want %v", tt.agentType, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseAgentTypesKeepsPiPia(t *testing.T) {
+	tests := []struct {
+		name    string
+		targets string
+		want    []string
+	}{
+		{
+			name:    "pi kept as first-class target",
+			targets: "pi",
+			want:    []string{"pi"},
+		},
+		{
+			name:    "pia kept as first-class target",
+			targets: "pia",
+			want:    []string{"pia"},
+		},
+		{
+			name:    "pi and pia mixed with built-ins",
+			targets: "cc,pi,cod,pia",
+			want:    []string{"claude", "pi", "codex", "pia"},
+		},
+		{
+			name:    "built-ins only unchanged",
+			targets: "cc,cod",
+			want:    []string{"claude", "codex"},
+		},
+		{
+			name:    "unknown plugin type dropped",
+			targets: "hermes",
+			want:    []string{},
+		},
+		{
+			name:    "pane and tags selectors ignored, agents kept",
+			targets: "pi,pane:3,tags:[backend],cod",
+			want:    []string{"pi", "codex"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseAgentTypes(tt.targets)
+			if len(got) != len(tt.want) {
+				t.Fatalf("parseAgentTypes(%q) = %v, want %v", tt.targets, got, tt.want)
+			}
+			for i, g := range got {
+				if g != tt.want[i] {
+					t.Errorf("parseAgentTypes(%q)[%d] = %q, want %q", tt.targets, i, g, tt.want[i])
+				}
+			}
+		})
+	}
+}

@@ -459,6 +459,11 @@ func isTrackedAgentType(agentType string) bool {
 	switch agentType {
 	case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "oc", "ollama":
 		return true
+	case "pi", "pia":
+		// First-class plugin agent types (pi-coding-agent): pi = bare
+		// interactive pi, pia = pi --approve. Tracked so target_types parsing
+		// keeps pi/pia instead of silently dropping them. See ee477ac5.
+		return true
 	default:
 		return false
 	}

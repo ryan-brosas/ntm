@@ -359,6 +359,74 @@ func TestFormatMarkdownAgentTypeCounts(t *testing.T) {
 	}
 }
 
+// Plugin agent types (pi/pia) are first-class: they get their own count
+// buckets and labels instead of being folded into "other". (bd-go3mz)
+func TestCountAgentsByTypePiPiaFirstClass(t *testing.T) {
+	panes := []tmux.Pane{
+		{Type: tmux.AgentType("pi")},
+		{Type: tmux.AgentType("pi")},
+		{Type: tmux.AgentType("pia")},
+		{Type: tmux.AgentType("oc")},
+		{Type: tmux.AgentClaude},
+		{Type: tmux.AgentUnknown},
+	}
+	result := countAgentsByType(panes)
+	if result["pi"] != 2 {
+		t.Errorf("counts[pi] = %d, want 2", result["pi"])
+	}
+	if result["pia"] != 1 {
+		t.Errorf("counts[pia] = %d, want 1", result["pia"])
+	}
+	if result["oc"] != 1 {
+		t.Errorf("counts[oc] = %d, want 1 (opencode is first-class, not 'other')", result["oc"])
+	}
+	if result["claude"] != 1 {
+		t.Errorf("counts[claude] = %d, want 1", result["claude"])
+	}
+	if result["other"] != 1 {
+		t.Errorf("counts[other] = %d, want 1 (only the truly unknown pane)", result["other"])
+	}
+}
+
+func TestSnapshotSessionCountsPiPiaFirstClass(t *testing.T) {
+	counts, _ := snapshotSessionCounts([]SnapshotAgent{
+		{Type: "pi", State: "idle"},
+		{Type: "pia", State: "working"},
+		{Type: "oc", State: "active"},
+		{Type: "claude", State: "active"},
+		{Type: "mystery", State: "error"},
+	})
+	if counts["pi"] != 1 {
+		t.Errorf("counts[pi] = %d, want 1", counts["pi"])
+	}
+	if counts["pia"] != 1 {
+		t.Errorf("counts[pia] = %d, want 1", counts["pia"])
+	}
+	if counts["oc"] != 1 {
+		t.Errorf("counts[oc] = %d, want 1 (opencode is first-class, not 'other')", counts["oc"])
+	}
+	if counts["claude"] != 1 {
+		t.Errorf("counts[claude] = %d, want 1", counts["claude"])
+	}
+	if counts["other"] != 1 {
+		t.Errorf("counts[other] = %d, want 1 (only the truly unknown agent)", counts["other"])
+	}
+}
+
+func TestFormatMarkdownAgentTypeCountsPiPiaLabels(t *testing.T) {
+	got := formatMarkdownAgentTypeCounts(map[string]int{
+		"claude": 1,
+		"pi":     2,
+		"pia":    1,
+		"other":  0,
+	})
+	// Labels: claude=cc, pi=pi, pia=pia. Order follows markdownAgentTypeOrder.
+	want := "cc:1 pi:2 pia:1"
+	if got != want {
+		t.Fatalf("formatMarkdownAgentTypeCounts() = %q, want %q", got, want)
+	}
+}
+
 // =============================================================================
 // AgentTable
 // =============================================================================

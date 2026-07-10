@@ -289,6 +289,8 @@ var markdownAgentTypeOrder = []string{
 	"aider",
 	"oc",
 	"ollama",
+	"pi",
+	"pia",
 	"user",
 	"other",
 }
@@ -302,6 +304,8 @@ var markdownAgentTypeLabels = map[string]string{
 	"aider":    "aid",
 	"oc":       "oc",
 	"ollama":   "oll",
+	"pi":       "pi",
+	"pia":      "pia",
 	"user":     "usr",
 	"other":    "oth",
 }
@@ -333,7 +337,7 @@ func snapshotSessionCounts(agents []SnapshotAgent) (map[string]int, map[string]i
 
 	for _, agent := range agents {
 		switch normalizedType := normalizeAgentType(agent.Type); normalizedType {
-		case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "ollama", "user":
+		case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "oc", "ollama", "pi", "pia", "user":
 			counts[normalizedType]++
 		default:
 			counts["other"]++
@@ -362,7 +366,7 @@ func countAgentsByType(panes []tmux.Pane) map[string]int {
 
 	for _, pane := range panes {
 		switch normalizedType := normalizeAgentType(string(pane.Type)); normalizedType {
-		case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "ollama", "user":
+		case "claude", "codex", "gemini", "cursor", "windsurf", "aider", "oc", "ollama", "pi", "pia", "user":
 			counts[normalizedType]++
 		default:
 			counts["other"]++

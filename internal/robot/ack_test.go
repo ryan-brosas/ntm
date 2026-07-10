@@ -988,3 +988,35 @@ func TestTimeoutBehavior_Semantics(t *testing.T) {
 		t.Log("ACK_TEST: LatencyMs = time(AckAt) - time(SentAt)")
 	})
 }
+
+// ackPaneTMUXAgentType must propagate the canonical plugin name for pi/pia
+// panes instead of tmux.AgentUnknown, so send() typing behavior and downstream
+// consumers see the real agent type. (bd-go3mz)
+func TestAckPaneTMUXAgentTypePiPiaFirstClass(t *testing.T) {
+	tests := []struct {
+		name string
+		pane tmux.Pane
+		want tmux.AgentType
+	}{
+		{name: "pi pane", pane: tmux.Pane{Type: tmux.AgentType("pi")}, want: tmux.AgentType("pi")},
+		{name: "pia pane", pane: tmux.Pane{Type: tmux.AgentType("pia")}, want: tmux.AgentType("pia")},
+		{name: "claude pane unchanged", pane: tmux.Pane{Type: tmux.AgentClaude}, want: tmux.AgentClaude},
+		{name: "codex pane unchanged", pane: tmux.Pane{Type: tmux.AgentCodex}, want: tmux.AgentCodex},
+		{name: "opencode pane unchanged", pane: tmux.Pane{Type: tmux.AgentOpencode}, want: tmux.AgentOpencode},
+		{name: "user pane unchanged", pane: tmux.Pane{Type: tmux.AgentUser}, want: tmux.AgentUser},
+		{name: "unknown pane still unknown", pane: tmux.Pane{Type: tmux.AgentUnknown}, want: tmux.AgentUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ackPaneTMUXAgentType(tt.pane)
+			if got != tt.want {
+				t.Errorf("ackPaneTMUXAgentType(Type=%q) = %q, want %q",
+					tt.pane.Type, got, tt.want)
+			}
+			// pi/pia must never collapse to AgentUnknown.
+			if (tt.pane.Type == tmux.AgentType("pi") || tt.pane.Type == tmux.AgentType("pia")) && got == tmux.AgentUnknown {
+				t.Errorf("pi/pia pane resolved to AgentUnknown; must keep its canonical type")
+			}
+		})
+	}
+}

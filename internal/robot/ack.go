@@ -239,7 +239,8 @@ func ackPaneAgentType(pane tmux.Pane) string {
 }
 
 func ackPaneTMUXAgentType(pane tmux.Pane) tmux.AgentType {
-	switch ackPaneAgentType(pane) {
+	agentType := ackPaneAgentType(pane)
+	switch agentType {
 	case "claude":
 		return tmux.AgentClaude
 	case "codex":
@@ -260,6 +261,13 @@ func ackPaneTMUXAgentType(pane tmux.Pane) tmux.AgentType {
 		return tmux.AgentOllama
 	case "user":
 		return tmux.AgentUser
+	case "pi", "pia":
+		// First-class plugin agent types (pi-coding-agent): propagate the
+		// canonical plugin name as the tmux agent type rather than
+		// AgentUnknown so send() typing/buffer behavior and downstream
+		// consumers see the real type. pi = bare interactive pi,
+		// pia = pi --approve. See ee477ac5.
+		return tmux.AgentType(agentType)
 	default:
 		return tmux.AgentUnknown
 	}
