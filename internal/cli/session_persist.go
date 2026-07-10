@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/session"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 	"github.com/Dicklesworthstone/ntm/internal/tui/theme"
@@ -794,7 +797,7 @@ func buildAgentCommands(state *session.SessionState) session.AgentCommands {
 		return rendered
 	}
 
-	return session.AgentCommands{
+	cmds := session.AgentCommands{
 		Claude:      render(cfg.Agents.Claude, "cc"),
 		Codex:       render(cfg.Agents.Codex, "cod"),
 		Gemini:      render(cfg.Agents.Gemini, "gmi"),
@@ -805,6 +808,70 @@ func buildAgentCommands(state *session.SessionState) session.AgentCommands {
 		Opencode:    render(opencodeCommandOrDefault(cfg.Agents.Opencode), "opencode"),
 		Ollama:      render(cfg.Agents.Ollama, "ollama"),
 	}
+
+	// Plugin-defined agent types (e.g. "pi"/"pia"): render each plugin's
+	// command template so restore/resume relaunch plugin panes like built-ins,
+	// mirroring the spawn/add/controller plugin dispatch. The plugin's declared
+	// default model is the lowest-precedence model fallback (same layering as
+	// resolveAgentModel) and plugin env vars are applied as a K=V prefix
+	// exactly like `ntm add`. Names are keyed first; aliases never displace a
+	// canonical name (saved pane types carry the canonical plugin Name).
+	loaded, _ := plugins.LoadAgentPlugins(filepath.Join(selectedConfigDir(), "agents"))
+	renderPlugin := func(p plugins.AgentPlugin) string {
+		v := vars
+		v.AgentType = p.Name
+		v.Model = strings.TrimSpace(p.Defaults.Model)
+		rendered, err := config.GenerateAgentCommand(p.Command, v)
+		if err != nil || rendered == "" {
+			return ""
+		}
+		return pluginEnvPrefix(p.Env) + rendered
+	}
+	for _, p := range loaded {
+		rendered := renderPlugin(p)
+		if rendered == "" {
+			continue
+		}
+		if cmds.Plugins == nil {
+			cmds.Plugins = make(map[string]string)
+		}
+		cmds.Plugins[strings.ToLower(p.Name)] = rendered
+	}
+	for _, p := range loaded {
+		alias := strings.ToLower(strings.TrimSpace(p.Alias))
+		if alias == "" {
+			continue
+		}
+		if _, taken := cmds.Plugins[alias]; taken {
+			continue
+		}
+		if rendered := renderPlugin(p); rendered != "" {
+			cmds.Plugins[alias] = rendered
+		}
+	}
+	return cmds
+}
+
+// pluginEnvPrefix renders a plugin's env map as a `K=V ` shell prefix on the
+// launch command, mirroring `ntm add`'s env application. Keys are sorted so
+// the rendered command is deterministic.
+func pluginEnvPrefix(env map[string]string) string {
+	if len(env) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(tmux.ShellQuote(env[k]))
+		b.WriteString(" ")
+	}
+	return b.String()
 }
 
 // applyModelCommands renders each agent pane's launch command with that pane's
@@ -818,13 +885,18 @@ func applyModelCommands(state *session.SessionState) {
 	if cfg == nil || state == nil {
 		return
 	}
+	// Load agent plugins once so plugin panes (pi/pia) relaunch with their
+	// captured model + env vars instead of dropping the model and falling
+	// back to the no-model default command (bd-jsqbf). Built-in panes never
+	// reach the plugin branch, so this is a no-op for them.
+	pluginLookup := loadPluginAgentLookup()
 	for i := range state.Panes {
 		ps := &state.Panes[i]
 		modelAlias := strings.TrimSpace(ps.Model)
 		if modelAlias == "" {
 			continue
 		}
-		tmpl, cliType, ok := agentTemplateAndType(ps.AgentType)
+		tmpl, cliType, env, ok := agentTemplateAndType(ps.AgentType, pluginLookup)
 		if !ok || tmpl == "" {
 			continue
 		}
@@ -837,41 +909,86 @@ func applyModelCommands(state *session.SessionState) {
 			ModelAlias:     modelAlias,
 			ModelRequested: true,
 		}
-		if rendered, err := config.GenerateAgentCommand(tmpl, v); err == nil && rendered != "" {
-			ps.Command = rendered
+		rendered, err := config.GenerateAgentCommand(tmpl, v)
+		if err != nil || rendered == "" {
+			continue
 		}
+		// Apply plugin env vars as a sorted K=V prefix, mirroring
+		// buildAgentCommands' plugin rendering and `ntm add`'s env
+		// application, so a captured-model plugin pane relaunches with the
+		// same environment as a fresh launch.
+		ps.Command = pluginEnvPrefix(env) + rendered
 	}
 }
 
+// loadPluginAgentLookup builds a case-insensitive lookup of agent plugins by
+// canonical Name and Alias, so resume/restore can resolve a saved plugin pane
+// type (carried as the plugin's canonical Name) to its plugin spec. A canonical
+// Name never gets displaced by an alias resolving to the same key, matching
+// buildAgentCommands' Plugins-key precedence.
+func loadPluginAgentLookup() map[string]plugins.AgentPlugin {
+	loaded, _ := plugins.LoadAgentPlugins(filepath.Join(selectedConfigDir(), "agents"))
+	lookup := make(map[string]plugins.AgentPlugin, len(loaded)*2)
+	for _, p := range loaded {
+		name := strings.ToLower(strings.TrimSpace(p.Name))
+		if name != "" {
+			if _, taken := lookup[name]; !taken {
+				lookup[name] = p
+			}
+		}
+	}
+	for _, p := range loaded {
+		alias := strings.ToLower(strings.TrimSpace(p.Alias))
+		if alias == "" {
+			continue
+		}
+		if _, taken := lookup[alias]; taken {
+			continue
+		}
+		lookup[alias] = p
+	}
+	return lookup
+}
+
 // agentTemplateAndType maps a saved pane's agent-type string to its configured
-// command template and the CLI AgentType used for model resolution. Mirrors the
-// type switch in session.getAgentCommand so model-aware relaunch covers exactly
-// the agent types the fallback launch path supports.
-func agentTemplateAndType(agentType string) (string, AgentType, bool) {
+// command template, the CLI AgentType used for model resolution, and any
+// plugin env vars to apply as a launch prefix. Built-in agent types resolve
+// from cfg.Agents; any other value falls back to the agent plugin registry
+// (pluginLookup), mirroring the spawn/add/controller plugin dispatch so
+// model-aware relaunch covers plugin agent panes (pi/pia) too. Mirrors the
+// type switch in session.getAgentCommand.
+func agentTemplateAndType(agentType string, pluginLookup map[string]plugins.AgentPlugin) (template string, cliType AgentType, env map[string]string, ok bool) {
 	if cfg == nil {
-		return "", "", false
+		return "", "", nil, false
 	}
 	switch agent.AgentType(agentType).Canonical() {
 	case tmux.AgentClaude:
-		return cfg.Agents.Claude, AgentTypeClaude, true
+		return cfg.Agents.Claude, AgentTypeClaude, nil, true
 	case tmux.AgentCodex:
-		return cfg.Agents.Codex, AgentTypeCodex, true
+		return cfg.Agents.Codex, AgentTypeCodex, nil, true
 	case tmux.AgentGemini:
-		return cfg.Agents.Gemini, AgentTypeGemini, true
+		return cfg.Agents.Gemini, AgentTypeGemini, nil, true
 	case tmux.AgentAntigravity:
-		return cfg.Agents.Antigravity, AgentTypeAntigravity, true
+		return cfg.Agents.Antigravity, AgentTypeAntigravity, nil, true
 	case tmux.AgentCursor:
-		return cfg.Agents.Cursor, AgentTypeCursor, true
+		return cfg.Agents.Cursor, AgentTypeCursor, nil, true
 	case tmux.AgentWindsurf:
-		return cfg.Agents.Windsurf, AgentTypeWindsurf, true
+		return cfg.Agents.Windsurf, AgentTypeWindsurf, nil, true
 	case tmux.AgentAider:
-		return cfg.Agents.Aider, AgentTypeAider, true
+		return cfg.Agents.Aider, AgentTypeAider, nil, true
 	case tmux.AgentOpencode:
-		return opencodeCommandOrDefault(cfg.Agents.Opencode), AgentTypeOpencode, true
+		return opencodeCommandOrDefault(cfg.Agents.Opencode), AgentTypeOpencode, nil, true
 	case tmux.AgentOllama:
-		return cfg.Agents.Ollama, AgentTypeOllama, true
+		return cfg.Agents.Ollama, AgentTypeOllama, nil, true
 	default:
-		return "", "", false
+		// Plugin-defined agent type (e.g. "pi"/"pia"): resolve its command
+		// template + env from the plugin registry. cliType is the plugin's
+		// lowercased canonical name so ResolveModel passes the captured model
+		// through unchanged (plugins have no cfg.Models alias map).
+		if p, found := pluginLookup[strings.ToLower(strings.TrimSpace(agentType))]; found {
+			return p.Command, AgentType(strings.ToLower(p.Name)), p.Env, true
+		}
+		return "", "", nil, false
 	}
 }
 

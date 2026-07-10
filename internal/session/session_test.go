@@ -652,6 +652,114 @@ func TestGetAgentCommand(t *testing.T) {
 	}
 }
 
+func TestGetAgentCommand_PluginFallback(t *testing.T) {
+	t.Parallel()
+
+	// bd-jsqbf: plugin agent panes (pi/pia) must resolve through the
+	// AgentCommands.Plugins map keyed by the plugin's lowercased canonical
+	// name, so restore/resume relaunch them instead of silently skipping.
+	cmds := AgentCommands{
+		Claude: "claude-cmd",
+		Plugins: map[string]string{
+			"pi":  "pi --model default",
+			"pia": "pia --model default",
+		},
+	}
+
+	tests := []struct {
+		agentType string
+		want      string
+	}{
+		{"pi", "pi --model default"},
+		{"PI", "pi --model default"}, // lookup is case-insensitive
+		{"pia", "pia --model default"},
+		{" unknown ", ""}, // unknown type with no plugin entry -> ""
+		{"cursor", ""},    // built-in falls through to its own field (empty here), not Plugins
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.agentType, func(t *testing.T) {
+			t.Parallel()
+			got := getAgentCommand(tt.agentType, cmds)
+			if got != tt.want {
+				t.Errorf("getAgentCommand(%q) = %q, want %q", tt.agentType, got, tt.want)
+			}
+		})
+	}
+
+	// With no Plugins map at all, plugin/built-in-missing types return "".
+	nilCmds := AgentCommands{Claude: "claude-cmd"}
+	if got := getAgentCommand("pi", nilCmds); got != "" {
+		t.Errorf("getAgentCommand(pi, nil Plugins) = %q, want \"\"", got)
+	}
+}
+
+// TestResumePaneSkippable covers bd-jsqbf point 2: the Resume fresh-launch
+// fallback for provider-less agent types. resumePaneSkippable is the pure
+// predicate Resume uses to decide skip-vs-relaunch, so the fallback is
+// deterministically testable without a tmux server. A provider-less pane
+// (plugin pi/pia or a built-in like aider/cursor) must NOT be skipped when it
+// has a launchable command (Plugins entry or built-in field or captured
+// Command); it is skipped only when it has none of those.
+func TestResumePaneSkippable(t *testing.T) {
+	t.Parallel()
+
+	withPlugins := AgentCommands{
+		Claude: "claude-cmd",
+		Aider:  "aider-cmd",
+		Plugins: map[string]string{
+			"pi":  "pi --model default",
+			"pia": "pia --model default",
+		},
+	}
+	noPlugins := AgentCommands{Claude: "claude-cmd"}
+
+	tests := []struct {
+		name string
+		ps   PaneState
+		cmds AgentCommands
+		want bool
+	}{
+		// User panes are always skipped.
+		{"user pane (literal)", PaneState{AgentType: "user"}, withPlugins, true},
+		{"user pane (AgentUser const)", PaneState{AgentType: string(tmux.AgentUser)}, withPlugins, true},
+
+		// Built-ins with a resume provider are never skipped, with or without a command.
+		{"cc has provider, no command", PaneState{AgentType: "cc"}, noPlugins, false},
+		{"cod has provider", PaneState{AgentType: "cod"}, noPlugins, false},
+		{"agy has provider", PaneState{AgentType: "agy"}, noPlugins, false},
+
+		// bd-jsqbf point 2: plugin panes (pi/pia) have no provider, so they are
+		// NOT skipped when a Plugins entry or captured Command exists — they
+		// reach the fresh-launch branch.
+		{"pi with Plugins entry", PaneState{AgentType: "pi"}, withPlugins, false},
+		{"pia with Plugins entry", PaneState{AgentType: "pia"}, withPlugins, false},
+		{"PI uppercase with Plugins entry", PaneState{AgentType: "PI"}, withPlugins, false},
+		{"pi with captured Command only", PaneState{AgentType: "pi", Command: "pi --model x"}, noPlugins, false},
+
+		// Provider-less built-in (aider) mirrors the plugin case: skippable only
+		// without any launchable command.
+		{"aider with built-in command", PaneState{AgentType: "aider"}, withPlugins, false},
+		{"aider no command", PaneState{AgentType: "aider"}, noPlugins, true},
+		{"cursor no command no provider", PaneState{AgentType: "cursor"}, noPlugins, true},
+
+		// Plugin pane with no Plugins entry and no captured Command is skipped.
+		{"pi no entry no command", PaneState{AgentType: "pi"}, noPlugins, true},
+		// Unknown agent type with nothing to launch is skipped.
+		{"unknown type no entry", PaneState{AgentType: "hermes"}, noPlugins, true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := resumePaneSkippable(tt.ps, tt.cmds)
+			if got != tt.want {
+				t.Errorf("resumePaneSkippable(%q) = %v, want %v", tt.ps.AgentType, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestShouldCreateDir(t *testing.T) {
 	// Cannot run in parallel due to home directory dependency
 

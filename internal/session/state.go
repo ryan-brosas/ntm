@@ -124,6 +124,12 @@ type AgentCommands struct {
 	Aider       string
 	Opencode    string
 	Ollama      string
+	// Plugins maps a plugin agent type's canonical name (lowercased, e.g.
+	// "pi", "pia") to its rendered launch command, so restore/resume can
+	// relaunch plugin-defined agent panes just like built-ins. Saved pane
+	// types come from plugin-aware pane detection, which records the
+	// plugin's canonical Name.
+	Plugins map[string]string
 }
 
 // SaveOptions configures how a session is saved.

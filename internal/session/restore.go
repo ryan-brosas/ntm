@@ -381,9 +381,11 @@ func Resume(state *SessionState, cmds AgentCommands, opts ResumeOptions) (*Resum
 		}
 		rp := ResumePane{Index: ps.Index, Title: ps.Title, AgentType: ps.AgentType}
 
-		// Skip user / non-agent panes.
-		if ps.AgentType == string(tmux.AgentUser) || ps.AgentType == "user" ||
-			agentsession.ResumeProvider(ps.AgentType) == "" {
+		// Skip user panes and panes with neither a provider resume path nor a
+		// fresh-launch command. The predicate is extracted (resumePaneSkippable)
+		// so plugin/built-in provider-less types with a launchable command fall
+		// through to the fresh-launch branch below; see its doc comment.
+		if resumePaneSkippable(ps, cmds) {
 			rp.Action = "skipped"
 			result.Skipped++
 			result.Panes = append(result.Panes, rp)
@@ -455,6 +457,28 @@ func Resume(state *SessionState, cmds AgentCommands, opts ResumeOptions) (*Resum
 	return result, nil
 }
 
+// resumePaneSkippable reports whether Resume should skip a pane (no relaunch).
+// A pane is skippable when it is a user pane, OR when it has neither a provider
+// resume path (agentsession.ResumeProvider) nor any launchable command (the
+// pane's pre-rendered Command, or the type-default from getAgentCommand).
+//
+// Plugin-defined agent types (pi/pia) and provider-less built-ins (cursor,
+// windsurf, aider, opencode, ollama) have no resume provider, so they are
+// skippable ONLY when they also lack a Plugins/built-in command entry and a
+// captured Command — otherwise they fall through to the fresh-launch branch,
+// matching the documented "panes without an id are launched fresh" (bd-jsqbf
+// point 2). Extracted as a pure predicate so the fallback is deterministically
+// testable without a tmux server.
+func resumePaneSkippable(ps PaneState, cmds AgentCommands) bool {
+	if ps.AgentType == string(tmux.AgentUser) || ps.AgentType == "user" {
+		return true
+	}
+	if agentsession.ResumeProvider(ps.AgentType) != "" {
+		return false
+	}
+	return ps.Command == "" && getAgentCommand(ps.AgentType, cmds) == ""
+}
+
 // getAgentCommand returns the command for an agent type.
 func getAgentCommand(agentType string, cmds AgentCommands) string {
 	switch agent.AgentType(agentType).Canonical() {
@@ -477,7 +501,10 @@ func getAgentCommand(agentType string, cmds AgentCommands) string {
 	case tmux.AgentOllama:
 		return cmds.Ollama
 	default:
-		return ""
+		// Plugin-defined agent types (e.g. "pi"/"pia"): Canonical() passes
+		// unknown types through unchanged, and cmds.Plugins is keyed by the
+		// plugin's lowercased canonical name.
+		return cmds.Plugins[strings.ToLower(strings.TrimSpace(agentType))]
 	}
 }
 
