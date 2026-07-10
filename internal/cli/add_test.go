@@ -243,12 +243,8 @@ func TestDeliverAddedPiPanePromptWaitsThenSubmitsExactlyOnce(t *testing.T) {
 		},
 	}
 
-	ready, err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", 30*time.Second)
-	if err != nil {
+	if err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", 30*time.Second); err != nil {
 		t.Fatalf("deliverAddedPiPanePromptWithHooks() error = %v", err)
-	}
-	if !ready {
-		t.Fatal("deliverAddedPiPanePromptWithHooks() ready = false, want true")
 	}
 	want := []string{"wait:%13", "single:%13:critical plan"}
 	if !reflect.DeepEqual(events, want) {
@@ -268,12 +264,9 @@ func TestDeliverAddedPiPanePromptDoesNotTypeBeforeReady(t *testing.T) {
 		},
 	}
 
-	ready, err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", time.Millisecond)
-	if err != nil {
-		t.Fatalf("deliverAddedPiPanePromptWithHooks() error = %v", err)
-	}
-	if ready {
-		t.Fatal("deliverAddedPiPanePromptWithHooks() ready = true, want false")
+	err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", time.Millisecond)
+	if err == nil || !strings.Contains(err.Error(), "not ready") {
+		t.Fatalf("deliverAddedPiPanePromptWithHooks() error = %v, want not-ready timeout", err)
 	}
 	if sends != 0 {
 		t.Fatalf("send calls = %d, want 0 while pane is not ready", sends)
@@ -293,15 +286,26 @@ func TestDeliverAddedPiPanePromptPropagatesReadinessError(t *testing.T) {
 		},
 	}
 
-	ready, err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", time.Millisecond)
+	err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", time.Millisecond)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("deliverAddedPiPanePromptWithHooks() error = %v, want %v", err, wantErr)
 	}
-	if ready {
-		t.Fatal("deliverAddedPiPanePromptWithHooks() ready = true, want false")
-	}
 	if sends != 0 {
 		t.Fatalf("send calls = %d, want 0 after readiness error", sends)
+	}
+}
+
+func TestDeliverAddedPiPanePromptPropagatesSubmitError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("tmux Enter failed")
+	hooks := addPromptDeliveryHooks{
+		waitReady:  func(string, time.Duration) (bool, error) { return true, nil },
+		sendSingle: func(string, string) error { return wantErr },
+	}
+
+	if err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", time.Millisecond); !errors.Is(err, wantErr) {
+		t.Fatalf("deliverAddedPiPanePromptWithHooks() error = %v, want %v", err, wantErr)
 	}
 }
 
@@ -316,6 +320,8 @@ func TestPiAddedPaneReadyFromFooter(t *testing.T) {
 		{name: "loading", scrollback: "loading skills...\nstarting MCP adapters...", want: false},
 		{name: "connecting prose", scrollback: "MCP: connecting servers...", want: false},
 		{name: "server error", scrollback: "MCP: server error", want: false},
+		{name: "numeric connecting", scrollback: "MCP: 1/6 servers connecting", want: false},
+		{name: "numeric error", scrollback: "MCP: 1/6 servers error", want: false},
 		{name: "footer connected", scrollback: "/data/projects/ntm (main)\n(openai-codex) gpt-5.6-sol • xhigh\nMCP: 1/6 servers", want: true},
 		{name: "footer zero connected", scrollback: "MCP: 0/6 servers", want: true},
 		{name: "startup banner", scrollback: "MCP: 1 servers connected (63 tools)", want: true},

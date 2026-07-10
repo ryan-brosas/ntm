@@ -84,6 +84,11 @@ func piAddedPaneReady(scrollback string) bool {
 			}
 		}
 		if validCounts && (fields[2] == "server" || fields[2] == "servers") {
+			status := strings.ToLower(strings.Join(fields[3:], " "))
+			if strings.Contains(status, "connecting") || strings.Contains(status, "error") ||
+				strings.Contains(status, "failed") || strings.Contains(status, "failure") {
+				continue
+			}
 			return true
 		}
 	}
@@ -113,18 +118,21 @@ func deliverAddedPiPanePromptWithHooks(
 	hooks addPromptDeliveryHooks,
 	paneID, prompt string,
 	timeout time.Duration,
-) (bool, error) {
+) error {
 	if prompt == "" {
-		return true, nil
+		return nil
 	}
 	ready, err := hooks.waitReady(paneID, timeout)
-	if err != nil || !ready {
-		return false, err
+	if err != nil {
+		return err
 	}
-	return true, hooks.sendSingle(paneID, prompt)
+	if !ready {
+		return fmt.Errorf("Pi pane %s not ready after %s", paneID, timeout)
+	}
+	return hooks.sendSingle(paneID, prompt)
 }
 
-func deliverAddedPiPanePrompt(paneID, prompt string) (bool, error) {
+func deliverAddedPiPanePrompt(paneID, prompt string) error {
 	return deliverAddedPiPanePromptWithHooks(addPromptDeliveryHooks{
 		waitReady: waitForAddedPiPaneReady,
 		sendSingle: func(paneID, prompt string) error {
@@ -773,16 +781,8 @@ func runAdd(opts AddOptions) error {
 			// one atomic paste, and submit with exactly one Enter.
 			startupPrompt := combineAddPrompts(cassContext, opts.Prompt)
 			if startupPrompt != "" {
-				ready, promptErr := deliverAddedPiPanePrompt(paneID, startupPrompt)
-				switch {
-				case promptErr != nil:
-					if !IsJSONOutput() {
-						fmt.Printf("⚠ Warning: failed to send prompt: %v\n", promptErr)
-					}
-				case !ready:
-					if !IsJSONOutput() {
-						fmt.Printf("⚠ Warning: timed out waiting for %s agent %d to become ready; prompt was not sent\n", agent.Type, num)
-					}
+				if promptErr := deliverAddedPiPanePrompt(paneID, startupPrompt); promptErr != nil && !IsJSONOutput() {
+					fmt.Printf("⚠ Warning: failed to send prompt: %v\n", promptErr)
 				}
 			}
 		} else {
