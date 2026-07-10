@@ -42,6 +42,139 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## Mandatory Skill Discovery — Immediately After Reading AGENTS.md
+
+After reading **all applicable `AGENTS.md` files in full**, do a skill-discovery pass **before planning or editing**:
+
+1. Inspect the complete skill catalogue exposed by the agent harness and the project-local skills under `.pi/skills/`.
+2. Select **every skill that materially helps the current task**. Do not limit yourself to a fixed menu, to examples another agent suggested, or to an arbitrary number of skills.
+3. Read each selected `SKILL.md` in full. Resolve relative references from that skill's directory and follow any required linked files or companion skills.
+4. State the selected skills and a one-line rationale for each in your working plan or Agent Mail task thread before editing.
+5. Re-run skill discovery whenever the work changes phase or evidence changes the problem: investigation, design, implementation, debugging, review, verification, and release can require different skills.
+
+For NTM swarm/orchestration work, `ntm` and `vibing-with-ntm` are normally relevant starting points, not an exhaustive list. Add debugging, testing, performance, security, coordination, API, documentation, or other skills whenever they improve the work.
+
+Do not load irrelevant skills merely to satisfy a checklist. The standard is **task relevance and correct application**, with agents free to expand or revise their skill set as the work evolves.
+
+### Pi-vcc auto-compaction continuity
+
+Pi sessions may compact automatically through `pi-vcc`. Coordinators must watch for compaction markers and context-pressure warnings without running expensive broad polling loops.
+
+Before an expected compaction or major phase boundary, persist a compact checkpoint in the task's Agent Mail thread: user goal, Bead ID, owned paths, current decisions/diff, latest verification or failure, active reservations/build slot, and literal next action.
+
+After **any** automatic or manual compaction, pause edits and complete this restoration gate before resuming:
+
+1. Re-read up to five active files, newest edits first.
+2. Reload the active skills, including `context-management` or `context-condensation` when relevant.
+3. Reconcile active work using the assigned Bead and Agent Mail thread.
+4. Verify `git branch --show-current` and `git status --short`.
+5. Recover missing rationale with targeted `vcc_recall`, `cm context`, or `cass search` only as needed.
+
+Post a short `post-compaction restored` acknowledgment with evidence in Agent Mail. In a swarm, the coordinator or delegated context monitor must block further edits from an agent whose restoration gate is incomplete.
+
+### Active coordinator dispatch contract
+
+A coordinator and its support agents are an active relay, not a passive reporting layer. Bind these functions dynamically to the available agents; do not hard-code provider names, models, pane counts, or identities.
+
+- **One decision authority:** the coordinator owns scope, priorities, conflict resolution, implementation authorization, and final acceptance. Support agents may discuss and recommend, but unresolved disagreement goes to the coordinator at a stated deadline rather than waiting for consensus.
+- **Delegated dispatch rights:** within the coordinator's current safety policy, support agents may directly assign investigations, read-only reviews, evidence requests, handoffs, and validation preparation. Implementation still requires an assigned Bead, narrow file reservation, and coordinator authorization.
+- **Single live board:** keep one Agent Mail thread containing each work item's owner, Bead or input, exact output, recipient, deadline, and state. Use stable tmux pane IDs plus Agent Mail identities; numeric pane indices are not durable after `ntm add` or layout changes.
+- **Required state machine:** `QUEUED -> DISPATCHED -> ACKED -> IN_FLIGHT -> HANDED_OFF -> ACCEPTED | REWORK | BLOCKED`. A send is not a handoff until the receiver acknowledges it, and a handoff is not complete until the recipient accepts it or requests rework.
+- **Default service levels:** require acknowledgment within five minutes and first evidence within twenty minutes unless the coordinator records a different deadline. After one targeted retry with no acknowledgment, escalate and reassign; never rely on repeated broadcasts.
+- **Handoff envelope:** every dispatch and result names `OWNER | INPUT/BEAD | EXACT OUTPUT | RECIPIENT | ACK BY | EVIDENCE BY | BLOCKER/DECISION | NEXT OWNER`.
+- **Active support invariant:** every support agent must either own a named outgoing dispatch, be waiting on a named acknowledgment/evidence deadline, or be intentionally stood down. Broad scans, repeated summaries, and generic status polling do not count as coordination work.
+- **Tending cadence:** at each 10–15 minute steady-state tick, ask only what state changed, what is late or blocked, and who receives the next artifact. Use faster checks only during recovery or immediately after dispatch. Verify movement through pane, Mail, Bead, reservation, Git, or validation evidence.
+- **Load shedding:** the coordinator delegates collection, routing, acknowledgment tracking, review pairing, compaction monitoring, and decision-queue synthesis to support agents. The coordinator should adjudicate and dispatch rather than redoing their scans.
+
+Coordinator/support prompts must state the current safety mode explicitly. If the mode is review-only, the relay keeps work moving through non-overlapping review slices and evidence handoffs without silently authorizing edits.
+
+### ACFS engineering team lifecycle
+
+Treat the swarm as one engineering organization delivering an integrated product. The canonical flow is:
+
+```text
+INTAKE -> GROUND -> PLAN -> GRAPH -> ENRICH -> CLAIM -> SHIP
+       -> REVIEW -> INTEGRATE -> VERIFY -> CLOSE -> LEARN
+```
+
+Implementation and fresh evidence should dominate elapsed time. ACFS tools are used at their natural gate, not invoked repeatedly as ceremony.
+
+#### Sources of truth
+
+| Concern | Canonical source |
+|---|---|
+| Product goal, architecture decisions, handoffs | Main Agent Mail thread; a Bead artifact only when the design is too large for the thread |
+| Work state, scope, priority, dependencies | `br`; graph analysis and next-work selection via robot-mode `bv` |
+| Owner, reviewer, acknowledgment, path/build leases | Agent Mail identities, thread messages, file reservations, and build slots |
+| Implemented behavior | Git working tree and commits on `main` |
+| Correctness and performance evidence | Test/build/lint/UBS outputs plus bounded smoke/benchmark artifacts |
+| External facts, current APIs, and prior art | Context7 for library/API contracts; cited primary sources found with provider-native `web_search`, then verified with Firecrawl scrape or official documentation |
+| Reusable prior knowledge | `cm context`, targeted `cass search`, and targeted `vcc_recall` |
+
+Do not maintain a second competing task board in prose.
+
+#### Lifecycle gates
+
+1. **INTAKE — product brief:** the product owner supplies the outcome and priorities. The architect records the outcome, non-goals, constraints, success measures, and safety mode in the main Mail thread.
+2. **GROUND — avoid relearning and guessing:** read applicable `AGENTS.md`, select phase-relevant skills, inspect current Git/Beads/Mail state, then use `cm context` and targeted CASS/VCC recall when prior decisions or failed approaches matter. Search existing Beads and threads before creating anything; absence of memory is not a blocker. Use Context7 for current library and framework API contracts. For every other load-bearing external claim—version, platform capability, security guidance, price, license, or claimed best practice—use provider-native `web_search`, prefer primary/official sources, and verify decisive pages with Firecrawl or direct documentation. Mark unresolved claims `[VERIFY]` rather than letting a panel guess survive into the plan.
+3. **PLAN — architecture packet:** for major work, define boundaries, data/control flow, key contracts, risks, rollout or cleanup behavior, and an acceptance matrix spanning behavior, failures, security, observability, performance, and tests. Attach a compact grounding ledger of `claim | source URL | version/date | confidence | implication`; copied search summaries without URLs are not evidence. Keep this in the main thread unless a durable `.beads/artifacts/<epic>/` plan is justified. A non-owner challenges KISS and missing contracts; the named architect decides after a time-boxed review.
+4. **GRAPH — create or reuse Beads:** reuse matching issues first. Otherwise create one epic/feature and independently verifiable child Beads with `br`, then add real dependencies. Use one Bead per coherent deliverable, not per file, reviewer comment, or agent. Run `br dep cycles` and `bv --robot-plan`/`--robot-insights`; cycles block implementation.
+5. **ENRICH — make work self-contained:** before dispatch, every Bead states problem/why, in-scope and out-of-scope behavior, exact likely paths or subsystem, acceptance criteria, required tests/evidence, risks, dependencies, and handoff recipient. Add labels/priority and one DRI plus one non-owner reviewer. Review enrichment until changes are marginal, not for a fixed number of rounds.
+6. **CLAIM — establish ownership:** the worker acknowledges the dispatch, atomically claims or updates the Bead to `in_progress`, joins its Mail thread, reserves the narrowest paths, and acquires a build slot only when needed. Duplicate or conflicting ownership blocks edits, not investigation and handoff.
+7. **SHIP — thin implementation:** implement risk-first in small compiling slices, normally one behavior and one to three files. For bugs, reproduce the failure or write the failing regression test first. Run targeted checks after each slice; post meaningful state changes or blockers, not narration. NTM tending keeps every healthy pane working, awaiting a named dependency/deadline, or actively reviewing.
+8. **REVIEW — distrust but verify:** the implementer self-reviews, then runs UBS on changed files before commit/handoff. Treat scanner failure or “unsupported language” as inconclusive, run `ubs doctor`, and use the documented Go fallback such as focused `go vet` rather than reporting a false pass. A non-owner receives a tight packet: Bead/requirements, changed paths/diff, checks already run, and risk hints. Findings must be concrete correctness, security, performance, completeness, or test-honesty issues—not style preferences or architecture relitigation.
+9. **INTEGRATE — one authority:** the engineering lead accepts/rejects handoffs, sequences shared-path changes on `main`, routes rework to the original healthy owner, and ensures Beads/Mail/reservations match Git reality. No agent stashes, reverts, or overwrites another agent's work.
+10. **VERIFY — fresh gates:** under one global validation slot, run formatting/import checks, build, focused then broad tests, linter or vet, and the smallest serialized real workflow that proves the acceptance matrix. Use RCH only when healthy/configured. For performance-sensitive work, compare measured baseline and post-change p50/p95/resource data. Agent reports and old test runs are not proof.
+11. **CLOSE — evidence-backed landing:** reconcile every acceptance row; close the Bead only with fresh evidence and a concrete reason, release reservations/build slots, post the final handoff, run `br sync --flush-only`, stage `.beads/` with the code, commit, pull/rebase safely, push, and verify the branch is synchronized. Failed or missing evidence means `REWORK` or `BLOCKED`, never “done.”
+12. **LEARN — improve the system:** encode recurring failures as tests, guards, concise AGENTS.md rules, or a genuinely reusable memory. CASS indexes the session; use explicit CM feedback only when a durable procedural lesson exists. Avoid review diaries and duplicate process documents.
+
+#### Fast path versus full path
+
+- **Small, clear bug:** `GROUND -> reuse/create one Bead -> ENRICH -> CLAIM -> SHIP -> REVIEW/UBS -> VERIFY -> CLOSE`.
+- **Cross-cutting feature or migration:** use every lifecycle gate, an epic with dependencies, an architecture/acceptance packet, `bv --robot-plan`, and staged integration.
+- **Pure read-only investigation:** stop at an evidence handoff or enrich/create the implementation Bead; do not claim shipping.
+
+#### ACFS trigger discipline
+
+- `br` is always the work-state source; `bv --robot-*` runs at planning, reprioritization, and queue-dry—not independently in every worker loop.
+- Agent Mail is always used for identity, targeted dispatch, acknowledgments, Bead threads, reservations, and handoffs; avoid broadcasts and communication purgatory.
+- `cm`/CASS/VCC are used at start, resume, compaction recovery, or a real decision gap; never run broad repeated searches that rediscover current thread state.
+- Use `web_search` during GROUND/PLAN for current external facts, then scrape/read the strongest primary sources. A dedicated read-only research pane may be added with `--piresearch=1`. Each scout packet owns at most five related claims but batches them into exactly one native `web_search` call, performs at most two decisive Firecrawl scrapes, cites URLs, stays under 600 words, and hands evidence to the architect. Never launch parallel search calls inside one pane: five 50KB results can exhaust a 272K context. Parallelize only genuinely independent research lanes; do not turn search volume into unsynthesized context.
+- NTM robot snapshot/attention/tail surfaces drive the operator loop. Use PT/SBH only when process or disk evidence triggers them, DCG/SLB for risky actions, and RU only for genuine cross-repo coordination.
+- UBS runs on the changed surface before handoff/commit. Verification gates run once through the coordinated slot, not concurrently in every pane.
+- Pi MCP servers are lazy by default. A footer such as `MCP: 1/6` is not proof that five servers are broken. On the first relevant use, call the server; after one bounded reconnect/retry, record `[TOOL DEGRADED: server | error | fallback]` and continue with the documented fallback. Never claim a tool was used without retaining its result or citation artifact.
+- Tool coverage is trigger-based, not ceremonial: use every tool that is material at its natural lifecycle gate, but never invoke every available tool on every Bead. Context7/Exa/Firecrawl belong in grounding; Tilth/Morph/`rg`/ast-grep in investigation; Agent Mail plus `br`/`bv` in coordination and graph work; UBS plus the build slot/RCH in verification; DCG/SLB/CAAM/PT/SBH/RU only when their concrete trigger fires.
+
+Agents are fungible across future work, but active slices require temporary explicit ownership. Assign by current context, availability, and provider health; do not create permanent model-specific bottlenecks or park healthy agents in generic standby.
+
+#### Flow v2 — fungible agents, end-to-end Bead ownership
+
+- The planner converts raw gaps into self-contained, dependency-correct Beads; the coordinator assigns a canonical `br ready` Bead exactly once.
+- Execution agents are fungible **between** Beads. Once assigned, one DRI owns the Bead continuously from `CLAIM` through implementation, self-review, peer-review rework, validation-slot acquisition, exact commit/push, `br close`, and lease/slot release.
+- Reviewer and validation are temporary gates or services, never casual ownership transfers. A non-owner reviews each diff revision once; ordinary rework returns to the same healthy DRI.
+- The serialized validation capability is a lease (`ntm-go-validation`), not a permanent validator identity. The current DRI acquires it and completes fresh verification; explicit separation of duties is reserved for security, compliance, destructive, release, or cross-cutting integration work.
+- One execution agent owns at most one active Bead. Default implementation WIP is three and `VERIFY_QUEUED` is capped at two. When the verification queue is full, health is not GREEN, or canonical `br ready` is empty, admit no new implementation work.
+- The planner targets two genuinely unblocked, enriched Beads visible in canonical `br ready`. Dependency-blocked future Beads do not count toward that buffer. If the graph cannot yield ready work, report the exact critical blocker and stand excess panes down rather than manufacturing filler.
+- Watchdogs optimize flow, never headcount: prioritize an idle validation slot with queued work, a landed commit whose Bead remains open, or one new ready assignment below WIP limits. Active-pane floors and generic backfill prompts are forbidden.
+
+### Pi-first spawn architecture and performance contract
+
+For this initiative, the product target is a Pi-native NTM experience built on clean plugin abstractions. `pi` and `pia` must work across spawn, add, send/ack, controller, status/health, save/resume/restore, restart, and exit without one-off operator repairs.
+
+- **One launch contract:** normalize agent type, plugin, command template, provider/model, reasoning effort, environment, approval mode, startup prompt, and lifecycle metadata once, then consume that contract across every launch/relaunch path. Do not maintain drifting Pi-only copies of generic logic.
+- **One prompt composer:** AGENTS.md-first bootstrap, skill discovery, Agent Mail registration, user marching orders, and compaction continuity are composed through one idempotent function with explicit opt-out/de-duplication semantics.
+- **Readiness, not sleeps:** model startup as explicit bounded states such as `process_started -> editor_ready -> prompt_queued -> prompt_submitted -> agent_working`. Wait on observable conditions with a deadline and useful error; never use an arbitrary delay as proof that Pi can receive input.
+- **Exactly-once submission:** a successful launch submits one complete prompt once. Retries must distinguish “not delivered” from “delivered but not yet acknowledged” so they cannot duplicate text or leave it waiting for a manual Enter.
+- **Pressure-aware concurrency:** cap concurrent startups and adapt staggering to measured CPU, memory, process-count, and provider pressure. Cancellation must stop queued launches. Do not create unbounded goroutines, overlapping build storms, or large transient pane populations.
+- **Transactional failure cleanup:** partial spawn/add failures cancel pending work and clean up only the panes/processes created by that operation. Preserve pre-existing sessions and return structured per-pane failure evidence.
+- **Truthful observability:** structured events and robot surfaces expose timing and state for process start, readiness, prompt submission, working/idle/limited/exited classification, retries, cancellation, and cleanup. Pi panes must not silently degrade to `user` or `unknown` when the plugin metadata is available.
+- **Measure before optimizing:** establish baselines for single-Pi and bounded-burst spawn latency, peak process/RSS, CPU PSI, prompt success, and orphan count. Optimize measured bottlenecks, then keep regression budgets for p50/p95 latency and resource use; do not invent micro-optimizations without data.
+- **Layered test strategy:** prefer pure/unit state-machine tests and fake-tmux integration tests for permutations and failures; add deterministic pressure/cancellation tests; reserve real tmux + real Pi for a small serialized smoke matrix. Tests must assert zero manual Enter, exactly one prompt, preserved metadata, correct status, bounded concurrency, and zero leaked panes/processes.
+
+A Pi-fit change is not accepted merely because one spawn succeeds. It must pass its lifecycle acceptance rows, peer review, fresh verification, and the bounded smoke path under normal and pressure/failure conditions.
+
+---
+
 ## Toolchain: Go
 
 We only use **Go** in this project. This is a pure Go project — never introduce non-Go tooling for building or testing.
