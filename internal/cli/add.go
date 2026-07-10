@@ -39,6 +39,102 @@ type AddOptions struct {
 	Prompt           string
 }
 
+const addPromptReadyTimeout = 30 * time.Second
+
+type addPromptDeliveryHooks struct {
+	waitReady  func(paneID string, timeout time.Duration) (bool, error)
+	sendSingle func(paneID, prompt string) error
+}
+
+func combineAddPrompts(cassContext, userPrompt string) string {
+	switch {
+	case cassContext == "":
+		return userPrompt
+	case userPrompt == "":
+		return cassContext
+	default:
+		return cassContext + "\n\n" + userPrompt
+	}
+}
+
+func isPiAddAgentType(agentType AgentType) bool {
+	switch strings.ToLower(strings.TrimSpace(string(agentType))) {
+	case "pi", "pia":
+		return true
+	default:
+		return false
+	}
+}
+
+// piAddedPaneReady identifies Pi's rendered MCP footer. CaptureForStatusDetection
+// returns only the visible tail, so this does not match stale scrollback. Pi emits
+// this footer only after its skills, extensions, and MCP adapters initialize.
+func piAddedPaneReady(scrollback string) bool {
+	for _, line := range strings.Split(scrollback, "\n") {
+		fields := strings.Fields(strings.TrimSpace(line))
+		if len(fields) < 3 || fields[0] != "MCP:" {
+			continue
+		}
+		counts := strings.Split(fields[1], "/")
+		validCounts := len(counts) == 1 || len(counts) == 2
+		for _, count := range counts {
+			if _, err := strconv.Atoi(count); err != nil {
+				validCounts = false
+				break
+			}
+		}
+		if validCounts && (fields[2] == "server" || fields[2] == "servers") {
+			return true
+		}
+	}
+	return false
+}
+
+func waitForAddedPiPaneReady(paneID string, timeout time.Duration) (bool, error) {
+	deadline := time.Now().Add(timeout)
+	var lastCaptureErr error
+	for {
+		scrollback, err := tmux.CaptureForStatusDetection(paneID)
+		lastCaptureErr = err
+		if err == nil && piAddedPaneReady(scrollback) {
+			return true, nil
+		}
+		if time.Now().After(deadline) {
+			if lastCaptureErr != nil {
+				return false, fmt.Errorf("capture Pi pane readiness: %w", lastCaptureErr)
+			}
+			return false, nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+func deliverAddedPiPanePromptWithHooks(
+	hooks addPromptDeliveryHooks,
+	paneID, prompt string,
+	timeout time.Duration,
+) (bool, error) {
+	if prompt == "" {
+		return true, nil
+	}
+	ready, err := hooks.waitReady(paneID, timeout)
+	if err != nil || !ready {
+		return false, err
+	}
+	return true, hooks.sendSingle(paneID, prompt)
+}
+
+func deliverAddedPiPanePrompt(paneID, prompt string) (bool, error) {
+	return deliverAddedPiPanePromptWithHooks(addPromptDeliveryHooks{
+		waitReady: waitForAddedPiPaneReady,
+		sendSingle: func(paneID, prompt string) error {
+			// Buffer paste is atomic for multiline text and this call emits exactly
+			// one Enter after the paste delay. Pi needs no confirmation Enter.
+			return tmux.SendBufferWithDelay(paneID, prompt, true, tmux.DoubleEnterFirstDelay)
+		},
+	}, paneID, prompt, addPromptReadyTimeout)
+}
+
 // opencodeCommandOrDefault returns the configured [agents] oc launch command,
 // falling back to config.DefaultOpencodeCommand (a model-aware template)
 // when it is unset. Centralizing this keeps the spawn, add, restart, and
@@ -671,22 +767,35 @@ func runAdd(opts AddOptions) error {
 			}()
 		}
 
-		// Inject CASS context if available
-		if cassContext != "" {
-			// Wait a bit for agent to start
-			time.Sleep(500 * time.Millisecond)
-			if err := sendPromptWithDoubleEnter(paneID, cassContext); err != nil {
-				if !IsJSONOutput() {
+		if isPiAddAgentType(agent.Type) {
+			// Pi/Pia startup is substantially longer than the fixed sleeps below.
+			// Wait for Pi's rendered editor footer, combine context and task into
+			// one atomic paste, and submit with exactly one Enter.
+			startupPrompt := combineAddPrompts(cassContext, opts.Prompt)
+			if startupPrompt != "" {
+				ready, promptErr := deliverAddedPiPanePrompt(paneID, startupPrompt)
+				switch {
+				case promptErr != nil:
+					if !IsJSONOutput() {
+						fmt.Printf("⚠ Warning: failed to send prompt: %v\n", promptErr)
+					}
+				case !ready:
+					if !IsJSONOutput() {
+						fmt.Printf("⚠ Warning: timed out waiting for %s agent %d to become ready; prompt was not sent\n", agent.Type, num)
+					}
+				}
+			}
+		} else {
+			// Preserve the established add behavior for built-in agents.
+			if cassContext != "" {
+				time.Sleep(500 * time.Millisecond)
+				if err := sendPromptWithDoubleEnter(paneID, cassContext); err != nil && !IsJSONOutput() {
 					fmt.Printf("⚠ Warning: failed to inject context: %v\n", err)
 				}
 			}
-		}
-
-		// Inject user prompt if provided
-		if opts.Prompt != "" {
-			time.Sleep(200 * time.Millisecond)
-			if err := sendPromptWithDoubleEnter(paneID, opts.Prompt); err != nil {
-				if !IsJSONOutput() {
+			if opts.Prompt != "" {
+				time.Sleep(200 * time.Millisecond)
+				if err := sendPromptWithDoubleEnter(paneID, opts.Prompt); err != nil && !IsJSONOutput() {
 					fmt.Printf("⚠ Warning: failed to send prompt: %v\n", err)
 				}
 			}

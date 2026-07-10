@@ -2,8 +2,11 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/output"
@@ -178,5 +181,150 @@ func TestAddResponseJSONIncludesOllama(t *testing.T) {
 	encoded := string(data)
 	if !strings.Contains(encoded, "\"added_ollama\":2") {
 		t.Fatalf("AddResponse JSON = %s, want added_ollama field", encoded)
+	}
+}
+
+func TestCombineAddPrompts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		cassContext string
+		userPrompt  string
+		want        string
+	}{
+		{name: "empty", want: ""},
+		{name: "context only", cassContext: "past context", want: "past context"},
+		{name: "user only", userPrompt: "do the work", want: "do the work"},
+		{name: "combined once", cassContext: "past context", userPrompt: "do the work", want: "past context\n\ndo the work"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := combineAddPrompts(tt.cassContext, tt.userPrompt); got != tt.want {
+				t.Fatalf("combineAddPrompts(%q, %q) = %q, want %q", tt.cassContext, tt.userPrompt, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsPiAddAgentType(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		agentType AgentType
+		want      bool
+	}{
+		{agentType: AgentType("pi"), want: true},
+		{agentType: AgentType("pia"), want: true},
+		{agentType: AgentType(" PI "), want: true},
+		{agentType: AgentTypeClaude, want: false},
+		{agentType: AgentTypeCodex, want: false},
+	} {
+		if got := isPiAddAgentType(tt.agentType); got != tt.want {
+			t.Errorf("isPiAddAgentType(%q) = %v, want %v", tt.agentType, got, tt.want)
+		}
+	}
+}
+
+func TestDeliverAddedPiPanePromptWaitsThenSubmitsExactlyOnce(t *testing.T) {
+	t.Parallel()
+
+	var events []string
+	hooks := addPromptDeliveryHooks{
+		waitReady: func(paneID string, timeout time.Duration) (bool, error) {
+			events = append(events, "wait:"+paneID)
+			return true, nil
+		},
+		sendSingle: func(paneID, prompt string) error {
+			events = append(events, "single:"+paneID+":"+prompt)
+			return nil
+		},
+	}
+
+	ready, err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", 30*time.Second)
+	if err != nil {
+		t.Fatalf("deliverAddedPiPanePromptWithHooks() error = %v", err)
+	}
+	if !ready {
+		t.Fatal("deliverAddedPiPanePromptWithHooks() ready = false, want true")
+	}
+	want := []string{"wait:%13", "single:%13:critical plan"}
+	if !reflect.DeepEqual(events, want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+}
+
+func TestDeliverAddedPiPanePromptDoesNotTypeBeforeReady(t *testing.T) {
+	t.Parallel()
+
+	var sends int
+	hooks := addPromptDeliveryHooks{
+		waitReady: func(string, time.Duration) (bool, error) { return false, nil },
+		sendSingle: func(string, string) error {
+			sends++
+			return nil
+		},
+	}
+
+	ready, err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", time.Millisecond)
+	if err != nil {
+		t.Fatalf("deliverAddedPiPanePromptWithHooks() error = %v", err)
+	}
+	if ready {
+		t.Fatal("deliverAddedPiPanePromptWithHooks() ready = true, want false")
+	}
+	if sends != 0 {
+		t.Fatalf("send calls = %d, want 0 while pane is not ready", sends)
+	}
+}
+
+func TestDeliverAddedPiPanePromptPropagatesReadinessError(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("capture failed")
+	var sends int
+	hooks := addPromptDeliveryHooks{
+		waitReady: func(string, time.Duration) (bool, error) { return false, wantErr },
+		sendSingle: func(string, string) error {
+			sends++
+			return nil
+		},
+	}
+
+	ready, err := deliverAddedPiPanePromptWithHooks(hooks, "%13", "critical plan", time.Millisecond)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("deliverAddedPiPanePromptWithHooks() error = %v, want %v", err, wantErr)
+	}
+	if ready {
+		t.Fatal("deliverAddedPiPanePromptWithHooks() ready = true, want false")
+	}
+	if sends != 0 {
+		t.Fatalf("send calls = %d, want 0 after readiness error", sends)
+	}
+}
+
+func TestPiAddedPaneReadyFromFooter(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		scrollback string
+		want       bool
+	}{
+		{name: "loading", scrollback: "loading skills...\nstarting MCP adapters...", want: false},
+		{name: "connecting prose", scrollback: "MCP: connecting servers...", want: false},
+		{name: "server error", scrollback: "MCP: server error", want: false},
+		{name: "footer connected", scrollback: "/data/projects/ntm (main)\n(openai-codex) gpt-5.6-sol • xhigh\nMCP: 1/6 servers", want: true},
+		{name: "footer zero connected", scrollback: "MCP: 0/6 servers", want: true},
+		{name: "startup banner", scrollback: "MCP: 1 servers connected (63 tools)", want: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := piAddedPaneReady(tt.scrollback); got != tt.want {
+				t.Fatalf("piAddedPaneReady() = %v, want %v for %q", got, tt.want, tt.scrollback)
+			}
+		})
 	}
 }
