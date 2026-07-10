@@ -14,6 +14,7 @@ import (
 	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/kernel"
 	"github.com/Dicklesworthstone/ntm/internal/output"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -245,41 +246,18 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 		agentType = "cc"
 	}
 
-	// Resolve agent type to full name
-	var agentTypeFull string
-	var agentCmdTemplate string
-	switch robot.ResolveAgentType(agentType) {
-	case "claude":
-		agentTypeFull = "claude"
-		agentCmdTemplate = cfg.Agents.Claude
-	case "codex":
-		agentTypeFull = "codex"
-		agentCmdTemplate = cfg.Agents.Codex
-	case "gemini":
-		agentTypeFull = "gemini"
-		agentCmdTemplate = cfg.Agents.Gemini
-	case "antigravity":
-		agentTypeFull = "antigravity"
-		agentCmdTemplate = cfg.Agents.Antigravity
-	case "cursor":
-		agentTypeFull = "cursor"
-		agentCmdTemplate = cfg.Agents.Cursor
-	case "windsurf", "ws":
-		agentTypeFull = "windsurf"
-		agentCmdTemplate = cfg.Agents.Windsurf
-	case "aider":
-		agentTypeFull = "aider"
-		agentCmdTemplate = cfg.Agents.Aider
-	case "oc":
-		agentTypeFull = "opencode"
-		// Mirror the spawn/add dispatch fallback so model injection works on
-		// restart too. See ntm#193.
-		agentCmdTemplate = opencodeCommandOrDefault(cfg.Agents.Opencode)
-	case "ollama":
-		agentTypeFull = "ollama"
-		agentCmdTemplate = cfg.Agents.Ollama
-	default:
-		return nil, fmt.Errorf("unknown agent type: %s", agentType)
+	// Resolve agent type to full name + launch command template. Built-in
+	// agent types resolve from cfg.Agents; plugin agent types (e.g. pi/pia)
+	// fall back to the agent plugin registry in the selected config dir,
+	// mirroring the spawn/add dispatch (see ntm#193 and bd-coiwn). For plugin
+	// types the resolver also returns the plugin's declared env map and
+	// default model so a controller-relaunched plugin launches with the same
+	// env prefix and --model as a fresh spawn instead of degrading to a bare
+	// command that drops both (bd-coiwn).
+	agentsDir := filepath.Join(selectedConfigDir(), "agents")
+	agentTypeFull, agentCmdTemplate, pluginEnv, pluginModel, err := resolveControllerAgentCommand(agentType, cfg, agentsDir)
+	if err != nil {
+		return nil, err
 	}
 
 	dir, err := resolveExplicitProjectDirForSession(session)
@@ -287,16 +265,28 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 		return nil, err
 	}
 
-	// Render the agent command template (fixes raw {{}} being sent to shell)
+	// Render the agent command template (fixes raw {{}} being sent to shell).
+	// pluginModel carries a plugin's declared default model (lowest precedence,
+	// mirroring spawn/add's resolveAgentModel fallback); built-ins have no
+	// plugin default ("" -> the template's own default branch applies, e.g.
+	// codex's `(.Model | default "gpt-5.5")`), so this is a no-op for them.
 	agentCmd, err := config.GenerateAgentCommand(agentCmdTemplate, config.AgentTemplateVars{
 		AgentType:   agentType,
 		SessionName: session,
 		PaneIndex:   1,
 		ProjectDir:  dir,
+		Model:       pluginModel,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("rendering agent command template: %w", err)
 	}
+
+	// Apply plugin env vars as a sorted K=V prefix, mirroring buildAgentCommands
+	// (session_persist) and `ntm add`'s env application, so a plugin controller
+	// (e.g. pi/pia) relaunches with the same environment as a fresh spawn
+	// (bd-coiwn). Built-in agents resolve with a nil env map, so this is a
+	// no-op for them.
+	agentCmd = pluginEnvPrefix(pluginEnv) + agentCmd
 
 	// Find or create pane 1
 	var targetPaneID string
@@ -372,6 +362,89 @@ func buildControllerResponse(opts ControllerInput) (*ControllerResponse, error) 
 		AgentCount:          agentCount,
 		AgentList:           strings.Join(agentList, "\n"),
 	}, nil
+}
+
+// resolveControllerAgentCommand maps a controller --agent-type value to the
+// canonical agent name, launch-command template, and (for plugin agent types)
+// the plugin's declared env map and default model. Built-in agent types
+// resolve from cfg.Agents with no plugin extras (nil env, "" model); any other
+// value falls back to the agent plugin registry in agentsDir (e.g. "pi"/"pia"),
+// mirroring the spawn/add plugin dispatch (see the oc/opencode fallback,
+// ntm#193, and bd-coiwn).
+//
+// Threading the plugin env + default model here means a controller-relaunched
+// plugin agent launches with the same env prefix and --model as a fresh spawn,
+// instead of degrading to a bare command that drops both (bd-coiwn). The
+// resolution is generic: there is no Pi-only branch — any plugin (pi, pia,
+// hermes, ...) resolves identically. Reasoning effort is intentionally not
+// threaded because ControllerInput carries no effort field, so there is no
+// source for it (per the Terra bd-coiwn scope; see RoseGull architecture
+// decision #2: no new effort flag where the caller has no source).
+func resolveControllerAgentCommand(agentType string, cfg *config.Config, agentsDir string) (agentTypeFull, agentCmdTemplate string, pluginEnv map[string]string, pluginModel string, err error) {
+	// Normalize the free-string --agent-type value once so the built-in
+	// switch (which robot.ResolveAgentType already trims) and the plugin
+	// fallback see the same input. add.go never sees whitespace because its
+	// AgentType comes from a parsed flag Var, but the controller accepts a
+	// raw string; without this, " pi " falls through to an exact-match
+	// plugin lookup that misses a "pi" plugin (bd-coiwn).
+	agentType = strings.TrimSpace(agentType)
+	switch robot.ResolveAgentType(agentType) {
+	case "claude":
+		return "claude", cfg.Agents.Claude, nil, "", nil
+	case "codex":
+		return "codex", cfg.Agents.Codex, nil, "", nil
+	case "gemini":
+		return "gemini", cfg.Agents.Gemini, nil, "", nil
+	case "antigravity":
+		return "antigravity", cfg.Agents.Antigravity, nil, "", nil
+	case "cursor":
+		return "cursor", cfg.Agents.Cursor, nil, "", nil
+	case "windsurf", "ws":
+		return "windsurf", cfg.Agents.Windsurf, nil, "", nil
+	case "aider":
+		return "aider", cfg.Agents.Aider, nil, "", nil
+	case "oc":
+		// Mirror the spawn/add dispatch fallback so model injection works on
+		// restart too. See ntm#193.
+		return "opencode", opencodeCommandOrDefault(cfg.Agents.Opencode), nil, "", nil
+	case "ollama":
+		return "ollama", cfg.Agents.Ollama, nil, "", nil
+	default:
+		name, cmd, ok := plugins.ResolveAgentCommand(agentType, agentsDir)
+		if !ok {
+			return "", "", nil, "", fmt.Errorf("unknown agent type: %s", agentType)
+		}
+		// Attach the matched plugin's env map + default model. agent.go is
+		// WindyTiger's seam (msg 811 / bd-02r9v), so ResolveAgentCommand is not
+		// extended here to return extras; controllerPluginExtras re-loads the
+		// registry and looks them up by the canonical name ResolveAgentCommand
+		// already normalized. The agents dir is tiny and a controller launch is
+		// rare, so the second read is negligible.
+		env, model := controllerPluginExtras(name, agentsDir)
+		return name, cmd, env, model, nil
+	}
+}
+
+// controllerPluginExtras returns the env map and default model declared by
+// the agent plugin whose canonical Name is pluginName (the value
+// ResolveAgentCommand already canonicalized from a name-or-alias input), or
+// nil/"" when no such plugin is installed. Built-in agent types never reach
+// this (the switch in resolveControllerAgentCommand claims them). Loading the
+// registry here — rather than extending plugins.ResolveAgentCommand to return
+// extras — keeps internal/plugins/agent.go in WindyTiger's seam (msg 811);
+// WindyTiger's AgentTypeForCommand consolidation may later expose a single
+// resolver the controller can adopt.
+func controllerPluginExtras(pluginName, agentsDir string) (env map[string]string, model string) {
+	loaded, err := plugins.LoadAgentPlugins(agentsDir)
+	if err != nil {
+		return nil, ""
+	}
+	for _, p := range loaded {
+		if p.Name == pluginName {
+			return p.Env, strings.TrimSpace(p.Defaults.Model)
+		}
+	}
+	return nil, ""
 }
 
 func controllerAgentList(panes []tmux.Pane) ([]string, int) {

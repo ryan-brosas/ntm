@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/Dicklesworthstone/ntm/internal/config"
 	"github.com/Dicklesworthstone/ntm/internal/robot"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -535,5 +537,225 @@ func TestRobotControllerNoPromptFlagRegistered(t *testing.T) {
 	}
 	if f.DefValue != "false" {
 		t.Errorf("--controller-no-prompt default = %q, want 'false'", f.DefValue)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// resolveControllerAgentCommand – plugin fallback + env/default-model (bd-coiwn)
+//
+// These cover the gap the bd-coiwn bead calls out: controller_test had zero
+// coverage of resolveControllerAgentCommand's plugin fallback and, post-fix,
+// of the env + default-model it now threads through. Built-ins must stay a
+// no-op for extras (nil env / "" model); plugin types (by name AND alias)
+// must resolve their declared env + default model; the render must emit the
+// env prefix + --model exactly like a fresh spawn. No Pi-only branch: any
+// plugin resolves identically.
+// ---------------------------------------------------------------------------
+
+func TestResolveControllerAgentCommand_BuiltInsReturnNoPluginExtras(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Agents: config.DefaultAgentTemplates()}
+	dir := t.TempDir() // empty: no plugins; built-ins must still resolve
+
+	tests := []struct{ in, wantFull string }{
+		{"cc", "claude"},
+		{"cod", "codex"},
+		{"gmi", "gemini"},
+		{"agy", "antigravity"},
+		{"cursor", "cursor"},
+		{"ws", "windsurf"},
+		{"aider", "aider"},
+		{"oc", "opencode"},
+		{"ollama", "ollama"},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.in, func(t *testing.T) {
+			t.Parallel()
+			full, cmd, env, model, err := resolveControllerAgentCommand(tt.in, cfg, dir)
+			if err != nil {
+				t.Fatalf("resolveControllerAgentCommand(%q) err: %v", tt.in, err)
+			}
+			if full != tt.wantFull {
+				t.Errorf("full = %q, want %q", full, tt.wantFull)
+			}
+			if cmd == "" {
+				t.Errorf("cmd template empty for built-in %q", tt.in)
+			}
+			if env != nil {
+				t.Errorf("built-in %q env = %v, want nil (no plugin extras)", tt.in, env)
+			}
+			if model != "" {
+				t.Errorf("built-in %q model = %q, want empty (no plugin default)", tt.in, model)
+			}
+		})
+	}
+}
+
+func TestResolveControllerAgentCommand_UnknownTypeErrors(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Agents: config.DefaultAgentTemplates()}
+	dir := t.TempDir() // no plugins installed
+
+	_, _, _, _, err := resolveControllerAgentCommand("hermes", cfg, dir)
+	if err == nil {
+		t.Fatal("expected error for unknown agent type with no matching plugin")
+	}
+	if !strings.Contains(err.Error(), "unknown agent type") {
+		t.Errorf("err = %v, want an 'unknown agent type' error", err)
+	}
+}
+
+func TestResolveControllerAgentCommand_PluginResolvesEnvAndDefaultModel(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Agents: config.DefaultAgentTemplates()}
+	dir := t.TempDir()
+	toml := `[agent]
+name = "pi"
+alias = "pia"
+command = "pi --model {{.Model}} run"
+
+[agent.env]
+PI_CONFIG_DIR = "/home/user/.pi"
+ANTHROPIC_API_KEY = "sk-test"
+
+[agent.defaults]
+model = "openai-codex/gpt-5.6-sol"
+`
+	if err := os.WriteFile(filepath.Join(dir, "pi.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Canonical name resolves and carries the plugin's env map + default model.
+	full, cmd, env, model, err := resolveControllerAgentCommand("pi", cfg, dir)
+	if err != nil {
+		t.Fatalf("pi err: %v", err)
+	}
+	if full != "pi" {
+		t.Errorf("full = %q, want pi", full)
+	}
+	if cmd != "pi --model {{.Model}} run" {
+		t.Errorf("cmd = %q, want declared template", cmd)
+	}
+	if len(env) != 2 || env["PI_CONFIG_DIR"] != "/home/user/.pi" || env["ANTHROPIC_API_KEY"] != "sk-test" {
+		t.Errorf("env = %v, want both plugin env vars", env)
+	}
+	if model != "openai-codex/gpt-5.6-sol" {
+		t.Errorf("model = %q, want plugin default model", model)
+	}
+
+	// Alias resolves to the SAME canonical plugin + same env + same model.
+	fullA, _, envA, modelA, errA := resolveControllerAgentCommand("pia", cfg, dir)
+	if errA != nil {
+		t.Fatalf("pia err: %v", errA)
+	}
+	if fullA != "pi" {
+		t.Errorf("alias pia full = %q, want canonical pi", fullA)
+	}
+	if !maps.Equal(envA, env) {
+		t.Errorf("alias env = %v, want same as canonical %v", envA, env)
+	}
+	if modelA != model {
+		t.Errorf("alias model = %q, want %q", modelA, model)
+	}
+}
+
+func TestResolveControllerAgentCommand_PluginWithoutEnvOrModel(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Agents: config.DefaultAgentTemplates()}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "solo.toml"),
+		[]byte("[agent]\nname = \"solo\"\ncommand = \"solo run\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	full, cmd, env, model, err := resolveControllerAgentCommand("solo", cfg, dir)
+	if err != nil {
+		t.Fatalf("solo err: %v", err)
+	}
+	if full != "solo" || cmd != "solo run" {
+		t.Errorf("solo = (%q, %q), want (solo, solo run)", full, cmd)
+	}
+	if env != nil {
+		t.Errorf("solo env = %v, want nil (plugin declares no env)", env)
+	}
+	if model != "" {
+		t.Errorf("solo model = %q, want empty (plugin declares no default model)", model)
+	}
+}
+
+func TestResolveControllerAgentCommand_TrimsWhitespace(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Agents: config.DefaultAgentTemplates()}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "pi.toml"),
+		[]byte("[agent]\nname = \"pi\"\ncommand = \"pi run\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The controller accepts a raw --agent-type string (unlike add.go's flag
+	// Var), so "  pi  " must be trimmed before the exact-match plugin lookup.
+	full, _, _, _, err := resolveControllerAgentCommand("  pi  ", cfg, dir)
+	if err != nil {
+		t.Fatalf("trimmed pi err: %v", err)
+	}
+	if full != "pi" {
+		t.Errorf("trimmed pi full = %q, want pi", full)
+	}
+}
+
+// TestResolveControllerAgentCommand_RendersEnvPrefixAndModel asserts the
+// end-to-end render contract (resolver -> GenerateAgentCommand + env prefix)
+// produces a command carrying both the plugin's default model (injected via
+// the template's {{.Model}}) and its env vars (sorted, shell-quoted prefix),
+// matching a fresh spawn's launch (bd-coiwn). No tmux required.
+func TestResolveControllerAgentCommand_RendersEnvPrefixAndModel(t *testing.T) {
+	t.Parallel()
+	cfg := &config.Config{Agents: config.DefaultAgentTemplates()}
+	dir := t.TempDir()
+	toml := `[agent]
+name = "pi"
+alias = "pia"
+command = "pi --model {{.Model}} run"
+
+[agent.env]
+PI_TOKEN = "secret"
+
+[agent.defaults]
+model = "openai-codex/gpt-5.6-sol"
+`
+	if err := os.WriteFile(filepath.Join(dir, "pi.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resolve via the alias to also exercise alias->canonical normalization.
+	full, cmdTmpl, env, model, err := resolveControllerAgentCommand("pia", cfg, dir)
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if full != "pi" {
+		t.Fatalf("full = %q, want canonical pi", full)
+	}
+
+	rendered, err := config.GenerateAgentCommand(cmdTmpl, config.AgentTemplateVars{
+		AgentType: "pi",
+		Model:     model,
+	})
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	final := pluginEnvPrefix(env) + rendered
+
+	// Env prefix present, shell-quoted, sorted.
+	if !strings.Contains(final, "PI_TOKEN='secret' ") {
+		t.Errorf("final cmd %q missing env prefix", final)
+	}
+	// Default model injected via the template's {{.Model}} placeholder.
+	if !strings.Contains(final, "--model openai-codex/gpt-5.6-sol") {
+		t.Errorf("final cmd %q missing injected default model", final)
+	}
+	// Command body follows the prefix.
+	if !strings.HasSuffix(final, "pi --model openai-codex/gpt-5.6-sol run") {
+		t.Errorf("final cmd %q is not prefix+body", final)
 	}
 }
