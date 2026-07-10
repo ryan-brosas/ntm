@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Dicklesworthstone/ntm/internal/config"
+	"github.com/Dicklesworthstone/ntm/internal/plugins"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -328,6 +330,27 @@ func restartAgentLaunchCommand(cfg *config.Config, agentType string) string {
 		}
 	}
 	if strings.TrimSpace(tmpl) == "" {
+		// Generic plugin fallback (bd-tgbow): when no built-in agent
+		// command is configured for agentType, resolve it from the agent
+		// plugin registry (~/.config/ntm/agents/*.toml) so respawn-pane
+		// relaunches the plugin's configured command template instead of a
+		// bare alias. This makes first-class plugin agents -- e.g. pi (-> "pi")
+		// and pia (-> "pi --approve") -- restart with their real command
+		// rather than the default launch alias (which for an unrecognized
+		// type is the Claude Code alias "cc", clearly wrong for pi/pia).
+		// Mirrors the controller restart path (resolveControllerAgentCommand)
+		// and the spawn/add plugin dispatch (pluginMap keyed by name+alias),
+		// so any plugin agent type resolves here, not just pi/pia. Rendered
+		// with empty AgentTemplateVars to match the built-in behavior above;
+		// preserving model/reasoning-effort across relaunch is tracked
+		// separately (bd-coiwn).
+		if dir := agentPluginsDir(); dir != "" {
+			if _, cmd, ok := plugins.ResolveAgentCommand(agentType, dir); ok {
+				tmpl = cmd
+			}
+		}
+	}
+	if strings.TrimSpace(tmpl) == "" {
 		return alias
 	}
 
@@ -339,6 +362,16 @@ func restartAgentLaunchCommand(cfg *config.Config, agentType string) string {
 		return alias
 	}
 	return rendered
+}
+
+// agentPluginsDir returns the directory holding agent plugin .toml files
+// (~/.config/ntm/agents, honoring NTM_CONFIG / XDG_CONFIG_HOME). It mirrors
+// the agents directory used by the spawn/add/controller plugin dispatch
+// (filepath.Join(filepath.Dir(config.DefaultPath()), "agents")). Empty only
+// when the config path cannot be resolved, in which case the plugin fallback
+// is skipped. See bd-tgbow.
+func agentPluginsDir() string {
+	return filepath.Join(filepath.Dir(config.DefaultPath()), "agents")
 }
 
 // paneShellPID queries the pane's current shell PID from tmux. Returns 0 when

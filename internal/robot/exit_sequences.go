@@ -5,8 +5,10 @@ package robot
 import (
 	"os/exec"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/Dicklesworthstone/ntm/internal/agent"
 	"github.com/Dicklesworthstone/ntm/internal/process"
 	"github.com/Dicklesworthstone/ntm/internal/tmux"
 )
@@ -16,21 +18,67 @@ import (
 // =============================================================================
 //
 // Each AI coding agent has different exit methods:
-// - Claude Code (cc): Double Ctrl+C with CRITICAL 0.1s timing
-// - Codex (cod): /exit command
-// - Gemini (gmi): Escape (exit shell mode if active) then /exit
-// - Unknown: Try Ctrl+C as fallback
+//   - Claude Code (cc): Double Ctrl+C with CRITICAL 0.1s timing
+//   - Codex (cod): /exit command
+//   - Gemini (gmi): Escape (exit shell mode if active) then /exit
+//   - pi/pia (pi-coding-agent): Double Ctrl+C — the pi TUI quits on two SIGINTs
+//     within 500ms (interactive-mode.handleCtrlC: the first clears the input
+//     editor, the second calls shutdown), the same gesture as Claude Code, so it
+//     reuses the double-Ctrl+C sequence. See bd-tgbow.
+//   - Unknown: Try Ctrl+C as fallback
+
+// agentExitKind classifies how an agent should be exited for smart restart.
+// It is the pure, tmux-free decision behind exitAgent so the dispatch can be
+// unit-tested without a live tmux session. See bd-tgbow.
+type agentExitKind string
+
+const (
+	exitKindDoubleCtrlC   agentExitKind = "double_ctrl_c"    // Claude Code, pi/pia
+	exitKindExitCommand   agentExitKind = "exit_command"     // Codex (/exit)
+	exitKindEscapeExit    agentExitKind = "escape_then_exit" // Gemini (Escape then /exit)
+	exitKindCtrlCFallback agentExitKind = "ctrl_c_fallback"  // Unknown single-Ctrl+C fallback
+)
+
+// resolveAgentExitKind returns the exit kind for the given agent type.
+//
+// Plugin TUI agents that quit on a double-Ctrl+C gesture — notably pi and pia
+// (pi-coding-agent interactive-mode.handleCtrlC: two SIGINTs within 500ms, the
+// first clears the editor and the second shuts down) — reuse the Claude Code
+// double-Ctrl+C sequence so smart restart actually quits them instead of only
+// clearing the input editor (which is all a single Ctrl+C does to pi). All
+// other unrecognized agent types fall back to a single Ctrl+C. See bd-tgbow.
+func resolveAgentExitKind(agentType string) agentExitKind {
+	switch restartCanonicalAgentType(agentType) {
+	case agent.AgentTypeClaudeCode:
+		return exitKindDoubleCtrlC
+	case agent.AgentTypeCodex:
+		return exitKindExitCommand
+	case agent.AgentTypeGemini:
+		return exitKindEscapeExit
+	default:
+		// First-class plugin TUI agents (pi-coding-agent) quit on a double
+		// Ctrl+C, matching Claude Code's gesture. Canonicalize so aliases and
+		// casing drift (e.g. "PI") still resolve correctly. agent.AgentType
+		// does not canonicalize pi/pia (they are not built-in types), so match
+		// the lowercased value directly, mirroring isTrackedAgentType.
+		switch strings.ToLower(strings.TrimSpace(agentType)) {
+		case "pi", "pia":
+			return exitKindDoubleCtrlC
+		}
+		return exitKindCtrlCFallback
+	}
+}
 
 // exitAgent exits the current agent using the appropriate method. win is the
 // pane's tmux window index (#172) so the exit keys target the correct window on
 // multi-window / window-per-agent layouts rather than always window 1.
 func exitAgent(session string, win, pane int, agentType string, seq *RestartSequence) error {
-	switch restartCanonicalAgentType(agentType) {
-	case "cc":
+	switch resolveAgentExitKind(agentType) {
+	case exitKindDoubleCtrlC:
 		return exitClaudeCode(session, win, pane, seq)
-	case "cod":
+	case exitKindExitCommand:
 		return exitCodex(session, win, pane, seq)
-	case "gmi":
+	case exitKindEscapeExit:
 		return exitGemini(session, win, pane, seq)
 	default:
 		return exitUnknown(session, win, pane, seq)

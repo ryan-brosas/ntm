@@ -3,6 +3,8 @@ package robot
 import (
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -421,6 +423,56 @@ func TestRestartAgentLaunchCommandRejectsControlCharacters(t *testing.T) {
 
 	if got := restartAgentLaunchCommand(cfg, "claude"); got != "cc" {
 		t.Errorf("restartAgentLaunchCommand control chars = %q, want fallback %q", got, "cc")
+	}
+}
+
+func TestRestartAgentLaunchCommandPluginFallback(t *testing.T) {
+	// bd-tgbow: first-class plugin agent types (pi/pia) must relaunch with
+	// their configured plugin command, not the bare launch alias (which for an
+	// unrecognized type is the Claude Code alias "cc" -- wrong for pi). The
+	// fallback is generic: any plugin in the agents dir resolves.
+	dir := t.TempDir()
+	agentsDir := filepath.Join(dir, "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentsDir, "pi.toml"), []byte(`[agent]
+name = "pi"
+command = "pi{{if .Model}} --model {{shellQuote .Model}}{{end}}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentsDir, "pia.toml"), []byte(`[agent]
+name = "pia"
+command = "pi --approve{{if .Model}} --model {{shellQuote .Model}}{{end}}"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Point config.DefaultPath() at the temp dir so agentPluginsDir()
+	// resolves to the temp agents dir, isolating the test from the real
+	// ~/.config/ntm/agents.
+	t.Setenv("NTM_CONFIG", filepath.Join(dir, "config.toml"))
+
+	cfg := config.Default()
+
+	// pi -> rendered plugin command "pi" (was the "cc" alias fallback).
+	if got := restartAgentLaunchCommand(cfg, "pi"); got != "pi" {
+		t.Errorf("restartAgentLaunchCommand(cfg, %q) = %q, want %q (plugin command, not the alias)", "pi", got, "pi")
+	}
+	// pia -> rendered plugin command "pi --approve".
+	if got := restartAgentLaunchCommand(cfg, "pia"); got != "pi --approve" {
+		t.Errorf("restartAgentLaunchCommand(cfg, %q) = %q, want %q (plugin command, not the alias)", "pia", got, "pi --approve")
+	}
+	// An agent type with no plugin and no configured built-in still falls back
+	// to the alias; the plugin fallback does not invent a command.
+	if got := restartAgentLaunchCommand(cfg, "nonexistent-plugin-type"); got == "pi" || got == "pi --approve" {
+		t.Errorf("restartAgentLaunchCommand(cfg, nonexistent) = %q, should not resolve to a plugin command", got)
+	}
+	// A built-in with a configured command is unaffected by the fallback.
+	cfg.Agents.Claude = "claude --dangerously-skip-permissions"
+	if got := restartAgentLaunchCommand(cfg, "claude"); got != "claude --dangerously-skip-permissions" {
+		t.Errorf("restartAgentLaunchCommand(cfg, claude) = %q, want configured built-in command", got)
 	}
 }
 
